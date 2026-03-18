@@ -1,0 +1,20 @@
+[package]
+name = "spse_predictive"
+version = "0.1.0"
+edition = "2021"
+
+[lib]
+name = "spse_predictive"
+path = "src/lib.rs"
+
+# If we want a binary as well
+[[bin]]
+name = "spse_predictive"
+path = "src/main.rs"
+
+[dependencies]
+kiddo = "4"
+rusqlite = { version = "0.31", features = ["bundled"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+rand = "0.8"
