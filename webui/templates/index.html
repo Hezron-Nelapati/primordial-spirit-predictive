@@ -1,0 +1,269 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>SPSE Predictive — Query UI</title>
+  <style>
+    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+    body {
+      font-family: "Segoe UI", system-ui, sans-serif;
+      background: #0f1117;
+      color: #e2e8f0;
+      min-height: 100vh;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      padding: 2rem 1rem;
+    }
+
+    header {
+      text-align: center;
+      margin-bottom: 2.5rem;
+    }
+
+    header h1 {
+      font-size: 1.8rem;
+      font-weight: 700;
+      letter-spacing: 0.04em;
+      color: #7dd3fc;
+    }
+
+    header p {
+      margin-top: 0.4rem;
+      font-size: 0.88rem;
+      color: #94a3b8;
+    }
+
+    .card {
+      background: #1e2230;
+      border: 1px solid #2d3449;
+      border-radius: 12px;
+      padding: 1.8rem;
+      width: 100%;
+      max-width: 720px;
+      box-shadow: 0 4px 32px rgba(0,0,0,0.5);
+    }
+
+    .field { margin-bottom: 1.1rem; }
+
+    label {
+      display: block;
+      font-size: 0.78rem;
+      font-weight: 600;
+      text-transform: uppercase;
+      letter-spacing: 0.06em;
+      color: #94a3b8;
+      margin-bottom: 0.35rem;
+    }
+
+    input, select {
+      width: 100%;
+      padding: 0.6rem 0.85rem;
+      background: #0f1117;
+      border: 1px solid #2d3449;
+      border-radius: 7px;
+      color: #e2e8f0;
+      font-size: 0.95rem;
+      outline: none;
+      transition: border-color 0.2s;
+    }
+
+    input:focus, select:focus { border-color: #7dd3fc; }
+
+    .row { display: flex; gap: 0.75rem; }
+    .row .field { flex: 1; }
+
+    button#submit {
+      width: 100%;
+      padding: 0.75rem;
+      margin-top: 0.5rem;
+      background: #0ea5e9;
+      border: none;
+      border-radius: 8px;
+      color: #fff;
+      font-size: 1rem;
+      font-weight: 600;
+      cursor: pointer;
+      transition: background 0.2s;
+    }
+
+    button#submit:hover { background: #38bdf8; }
+    button#submit:disabled { background: #334155; cursor: default; }
+
+    /* Answer panel */
+    #answer-panel {
+      display: none;
+      margin-top: 1.5rem;
+      padding: 1.1rem 1.3rem;
+      border-radius: 9px;
+      border-left: 4px solid #0ea5e9;
+      background: #12161f;
+      font-size: 1.05rem;
+      line-height: 1.6;
+      word-break: break-word;
+    }
+
+    #answer-panel.error { border-left-color: #f87171; color: #f87171; }
+    #answer-panel.ok    { border-left-color: #34d399; }
+
+    /* Trace log */
+    #trace-toggle {
+      margin-top: 1rem;
+      background: none;
+      border: none;
+      color: #7dd3fc;
+      font-size: 0.82rem;
+      cursor: pointer;
+      text-decoration: underline;
+      display: none;
+    }
+
+    #trace-box {
+      display: none;
+      margin-top: 0.6rem;
+      background: #0b0e14;
+      border: 1px solid #1e2a3a;
+      border-radius: 7px;
+      padding: 0.9rem 1rem;
+      font-family: "Fira Code", "Consolas", monospace;
+      font-size: 0.75rem;
+      color: #64748b;
+      white-space: pre-wrap;
+      max-height: 340px;
+      overflow-y: auto;
+    }
+
+    /* Spinner */
+    .spinner {
+      display: inline-block;
+      width: 14px; height: 14px;
+      border: 2px solid #fff;
+      border-top-color: transparent;
+      border-radius: 50%;
+      animation: spin 0.7s linear infinite;
+      vertical-align: middle;
+      margin-right: 6px;
+    }
+
+    @keyframes spin { to { transform: rotate(360deg); } }
+  </style>
+</head>
+<body>
+
+<header>
+  <h1>SPSE Predictive</h1>
+  <p>Graph-walk query interface &mdash; backed by SQLite + centroid ML classifier</p>
+</header>
+
+<div class="card">
+  <div class="field">
+    <label for="query">Query</label>
+    <input id="query" type="text" placeholder="e.g. Is the server online?" autocomplete="off" />
+  </div>
+
+  <div class="row">
+    <div class="field">
+      <label for="entity">Entity (start node)</label>
+      <input id="entity" type="text" placeholder="e.g. server" autocomplete="off" />
+    </div>
+    <div class="field">
+      <label for="domain">Domain</label>
+      <select id="domain">
+        <option value="general">general</option>
+        <option value="tech">tech</option>
+        <option value="finance">finance</option>
+        <option value="science">science</option>
+        <option value="geography">geography</option>
+      </select>
+    </div>
+    <div class="field" style="max-width:110px">
+      <label for="year">Year (opt.)</label>
+      <input id="year" type="number" placeholder="e.g. 2026" min="1000" max="2099" />
+    </div>
+  </div>
+
+  <button id="submit" onclick="runQuery()">Run Query</button>
+
+  <div id="answer-panel"></div>
+  <button id="trace-toggle" onclick="toggleTrace()">▶ Show system trace</button>
+  <pre id="trace-box"></pre>
+</div>
+
+<script>
+  let traceVisible = false;
+
+  async function runQuery() {
+    const query  = document.getElementById("query").value.trim();
+    const entity = document.getElementById("entity").value.trim();
+    const domain = document.getElementById("domain").value;
+    const year   = document.getElementById("year").value.trim();
+
+    if (!query || !entity) {
+      showAnswer("Query and entity are required.", true);
+      return;
+    }
+
+    const btn = document.getElementById("submit");
+    btn.disabled = true;
+    btn.innerHTML = '<span class="spinner"></span>Running…';
+    hideTrace();
+
+    try {
+      const resp = await fetch("/query", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ query, entity, domain, year }),
+      });
+      const data = await resp.json();
+      showAnswer(data.answer, data.error);
+      if (data.trace) showTraceToggle(data.trace);
+    } catch (e) {
+      showAnswer("Network error: " + e.message, true);
+    } finally {
+      btn.disabled = false;
+      btn.textContent = "Run Query";
+    }
+  }
+
+  function showAnswer(text, isError) {
+    const p = document.getElementById("answer-panel");
+    p.textContent = text;
+    p.className = isError ? "error" : "ok";
+    p.style.display = "block";
+  }
+
+  function showTraceToggle(trace) {
+    const toggle = document.getElementById("trace-toggle");
+    const box    = document.getElementById("trace-box");
+    box.textContent = trace;
+    toggle.style.display = "block";
+    toggle.textContent = "▶ Show system trace";
+    box.style.display = "none";
+    traceVisible = false;
+  }
+
+  function toggleTrace() {
+    const toggle = document.getElementById("trace-toggle");
+    const box    = document.getElementById("trace-box");
+    traceVisible = !traceVisible;
+    box.style.display = traceVisible ? "block" : "none";
+    toggle.textContent = traceVisible ? "▼ Hide system trace" : "▶ Show system trace";
+  }
+
+  function hideTrace() {
+    document.getElementById("trace-toggle").style.display = "none";
+    document.getElementById("trace-box").style.display = "none";
+    document.getElementById("answer-panel").style.display = "none";
+    traceVisible = false;
+  }
+
+  // Submit on Enter
+  document.addEventListener("keydown", e => {
+    if (e.key === "Enter" && !document.getElementById("submit").disabled) runQuery();
+  });
+</script>
+
+</body>
+</html>

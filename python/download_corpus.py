@@ -6,7 +6,9 @@ def main():
     # 'simple' english wikipedia has shorter crisp sentences (great for RAG testing). 
     # 1% split is about ~2,000 Wikipedia articles.
     try:
-        ds = datasets.load_dataset("wikipedia", "20220301.simple", split="train[:1%]", trust_remote_code=True) 
+        # wikimedia/wikipedia is the Parquet-format successor to the legacy wikipedia script.
+        # "20231101.simple" is Simple English Wikipedia — shorter crisp sentences, ideal for RAG.
+        ds = datasets.load_dataset("wikimedia/wikipedia", "20231101.simple", split="train[:1%]")
     except Exception as e:
         print(f"Error loading dataset: {e}")
         return
