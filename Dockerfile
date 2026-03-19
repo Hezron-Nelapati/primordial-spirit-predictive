@@ -65,14 +65,12 @@ RUN pip install --no-cache-dir -r python/requirements.txt
 # Download spaCy model
 RUN python3 -m spacy download en_core_web_sm
 
-# Download NLTK data required by classify_query.py, ingest.py, server.py
+# Download NLTK data required by classify_query.py, ingest.py, ingest_wiki.py
 RUN python3 -c "\
 import nltk; \
-nltk.download('punkt_tab',                    quiet=True); \
+nltk.download('punkt_tab',                      quiet=True); \
 nltk.download('averaged_perceptron_tagger_eng', quiet=True); \
-nltk.download('maxent_ne_chunker_tab',        quiet=True); \
-nltk.download('words',                        quiet=True); \
-nltk.download('punkt',                        quiet=True); \
+nltk.download('punkt',                          quiet=True); \
 "
 
 # Python pipeline scripts and web UI

@@ -3,6 +3,7 @@ import math
 import os
 import re
 import nltk
+import spacy
 
 os.environ.setdefault("TOKENIZERS_PARALLELISM", "false")
 
@@ -12,8 +13,18 @@ try:
 except Exception:
     pass
 
-# ── NER types — must match classify_query.py exactly ─────────────────────────
+# ── NER types — must match classify_query.py / ingest.py exactly ─────────────
 NER_TYPES = {"PERSON", "ORG", "GPE", "PRODUCT"}
+
+# Lazy-loaded spaCy model — loaded once when first needed.
+_nlp = None
+
+
+def _get_nlp():
+    global _nlp
+    if _nlp is None:
+        _nlp = spacy.load("en_core_web_sm", disable=["parser", "lemmatizer"])
+    return _nlp
 
 # ── POS tag sets — must match classify_query.py exactly ──────────────────────
 _INTENT_TAGS = {"VB", "VBD", "VBG", "VBN", "VBP", "VBZ", "NN", "NNS", "NNP", "NNPS"}
@@ -120,21 +131,16 @@ def main():
     else:
         classifications = [("statement", "neutral", "general")] * len(all_sentences)
 
-    # Release torch model before spaCy runs (avoids loky semaphore conflict
-    # on Python 3.14).
+    # Release the torch model — its loky workers are no longer needed.
     del clf_model
 
-    # ── Pass 3: spaCy NER (identical logic to classify_query.py) ─────────────
-    print(f"  [INGEST_WIKI]: Extracting entities with spaCy (batch) …", flush=True)
-    entity_lists = []
-    try:
-        import spacy
-        nlp = spacy.load("en_core_web_sm")
-        for doc in nlp.pipe(all_sentences, batch_size=256):
-            entity_lists.append([ent.text for ent in doc.ents if ent.label_ in NER_TYPES])
-    except (ImportError, OSError) as e:
-        print(f"  [INGEST_WIKI]: spaCy unavailable ({e}) — entities will be empty.", flush=True)
-        entity_lists = [[] for _ in all_sentences]
+    # ── Pass 3: entity extraction with spaCy (in-process, after torch is done) ─
+    print(f"  [INGEST_WIKI]: Extracting entities from {len(all_sentences):,} sentences …", flush=True)
+    nlp = _get_nlp()
+    entity_lists = [
+        [ent.text for ent in doc.ents if ent.label_ in NER_TYPES]
+        for doc in nlp.pipe(all_sentences, batch_size=256)
+    ]
 
     # ── Pass 4: date extraction + assemble output ─────────────────────────────
     processed_data = []

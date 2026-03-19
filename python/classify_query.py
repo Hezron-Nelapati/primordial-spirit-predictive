@@ -20,6 +20,7 @@ os.environ.setdefault("HF_HUB_DISABLE_SYMLINKS_WARNING", "1")
 os.environ.setdefault("TOKENIZERS_PARALLELISM", "false")
 
 import nltk
+import spacy
 from sentence_transformers import SentenceTransformer
 
 # ── Absolute default centroids path (works regardless of caller's CWD) ───────
@@ -29,7 +30,7 @@ _DEFAULT_CENTROIDS = os.path.join(_MODULE_DIR, "..", "data", "centroids.json")
 # ── Module-level singletons — loaded once, reused for every classify() call ──
 _model: SentenceTransformer | None = None
 _store: dict | None                = None
-_nlp                               = None   # spaCy model, loaded once on first classify()
+_nlp                               = None
 
 # ── NER types — must match ingest.py / ingest_wiki.py exactly ────────────────
 NER_TYPES = {"PERSON", "ORG", "GPE", "PRODUCT"}
@@ -49,15 +50,23 @@ DOMAIN_KEYWORDS = {
 
 
 def _ensure_nltk():
-    for resource, path in [
-        ("punkt_tab",                     "tokenizers/punkt_tab"),
-        ("averaged_perceptron_tagger_eng","taggers/averaged_perceptron_tagger_eng"),
-    ]:
+    needed = [
+        ("punkt_tab",                      "tokenizers/punkt_tab"),
+        ("averaged_perceptron_tagger_eng", "taggers/averaged_perceptron_tagger_eng"),
+    ]
+    for resource, path in needed:
         try:
             nltk.data.find(path)
         except LookupError:
             print(f"  [classify_query]: downloading NLTK '{resource}'...", file=sys.stderr)
             nltk.download(resource, quiet=True)
+
+
+def _get_nlp():
+    global _nlp
+    if _nlp is None:
+        _nlp = spacy.load("en_core_web_sm", disable=["parser", "lemmatizer"])
+    return _nlp
 
 
 def _pos_filter(text: str, tag_set: set) -> str:
@@ -121,22 +130,11 @@ def reset_store() -> None:
     print("  [classify_query]: centroids cache invalidated.", file=sys.stderr)
 
 
-def _get_nlp():
-    """Load spaCy en_core_web_sm once and cache it.  Same model used in
-    ingest.py / ingest_wiki.py — entity extraction logic is identical across
-    training and runtime so stored entity strings always match query entities."""
-    global _nlp
-    if _nlp is None:
-        import spacy
-        _nlp = spacy.load("en_core_web_sm")
-        print("  [classify_query]: spaCy en_core_web_sm loaded.", file=sys.stderr)
-    return _nlp
-
-
 def _ner_entities(text: str) -> list:
-    """Extract named entities using spaCy — identical to ingest.py Pass 3."""
+    """Extract named entities with spaCy — identical label set to ingest.py / ingest_wiki.py."""
     try:
-        doc = _get_nlp()(text)
+        nlp      = _get_nlp()
+        doc      = nlp(text)
         entities = [ent.text for ent in doc.ents if ent.label_ in NER_TYPES]
         print(f"  [classify_query]: NER → {entities}", file=sys.stderr)
         return entities

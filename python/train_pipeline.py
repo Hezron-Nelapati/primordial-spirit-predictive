@@ -1,4 +1,4 @@
-#!/usr/bin/env python3
+#!/usr/bin/env python3.11
 """
 Automated training pipeline for SPSE Predictive.
 
@@ -47,13 +47,16 @@ def log(tag: str, msg: str) -> None:
     print(f"[{tag}] {msg}", flush=True)
 
 
+PYTHON = "python3.11"
+
+
 def run_script(script_name: str) -> int:
     """Run a Python script in python/ directory, streaming all output to stdout.
     Uses cwd=PYTHON_DIR so that '../data/' paths inside scripts resolve correctly
     to the project-root data/ directory.
     -u flag forces unbuffered stdout/stderr so lines appear immediately instead
     of being held in an 8 KB pipe buffer until the subprocess exits."""
-    cmd = [sys.executable, "-u", os.path.join(PYTHON_DIR, script_name)]
+    cmd = [PYTHON, "-u", os.path.join(PYTHON_DIR, script_name)]
     env = {**os.environ, "PYTHONUNBUFFERED": "1"}
     proc = subprocess.Popen(
         cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
