@@ -36,11 +36,13 @@ def log(tag: str, msg: str) -> None:
 
 
 def run_script(script_name: str) -> int:
-    """Run a Python script in python/ directory, streaming all output to stdout."""
+    """Run a Python script in python/ directory, streaming all output to stdout.
+    Uses cwd=PYTHON_DIR so that '../data/' paths inside scripts resolve correctly
+    to the project-root data/ directory."""
     cmd = [sys.executable, os.path.join(PYTHON_DIR, script_name)]
     proc = subprocess.Popen(
         cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
-        text=True, cwd=ROOT,
+        text=True, cwd=PYTHON_DIR,
     )
     for line in iter(proc.stdout.readline, ""):
         print(line, end="", flush=True)

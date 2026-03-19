@@ -6,10 +6,11 @@ use spse_predictive::spatial::SpatialGrid;
 use spse_predictive::reasoning::{evaluate_arithmetic, extract_year_from_query, is_arithmetic_query};
 use spse_predictive::walk::{compute_depth_limit, is_reachable, predict_next, secondary_signal, WalkConfig, WalkMode};
 use std::fs;
+use std::io::{self, BufRead, Write};
 use std::process::Command;
 
 /// Classify `query` using the trained centroid model via `python/classify_query.py`.
-/// Returns `(intent, tone, domain, entities)` or `None` if Python / the model is unavailable.
+/// Only called in CLI mode — server mode receives pre-classified data from Flask.
 fn classify_query(query: &str, session_id: &str) -> Option<(String, String, String, Vec<String>)> {
     let output = Command::new("python3")
         .args(["python/classify_query.py", query, "--session-id", session_id])
@@ -33,8 +34,7 @@ fn classify_query(query: &str, session_id: &str) -> Option<(String, String, Stri
 }
 
 /// Pass the raw graph fact through `python/minillm_wrapper.py` for
-/// conversational stylistic reformatting.  Returns `None` on any subprocess
-/// or Python failure so callers can fall back to the raw fact gracefully.
+/// conversational stylistic reformatting. Only called in CLI mode.
 fn llm_style(fact: &str, query: &str) -> Option<String> {
     let output = Command::new("python3")
         .args(["python/minillm_wrapper.py", fact, query])
@@ -43,13 +43,11 @@ fn llm_style(fact: &str, query: &str) -> Option<String> {
 
     if output.status.success() {
         let stdout = String::from_utf8_lossy(&output.stdout);
-        // The wrapper emits "🤖 BOT: <response>" — extract just the response.
         for line in stdout.lines() {
             if let Some(rest) = line.strip_prefix("🤖 BOT:") {
                 return Some(rest.trim().to_string());
             }
         }
-        // Fallback: return full stdout trimmed if the marker line is absent.
         Some(stdout.trim().to_string())
     } else {
         None
@@ -66,12 +64,12 @@ fn generate_dynamic_answer(
     reasoning: &mut ReasoningModule<'_>,
     config: &WalkConfig,
 ) -> String {
-    println!("\n[USER_QUERY]: \"{}\"", query);
+    eprintln!("\n[USER_QUERY]: \"{}\"", query);
 
     // Guardrail 3: Pre-execution sanitization pass on the accumulated intent queue
     let sanitized = ReasoningModule::sanitize_queue(reasoning.session.intent_stack.clone());
     let effective_intent = sanitized.last().map(String::as_str).unwrap_or("statement");
-    println!("  [GUARDRAIL_3]: Sanitized intent queue -> {:?}  (effective: '{}')", sanitized, effective_intent);
+    eprintln!("  [GUARDRAIL_3]: Sanitized intent queue -> {:?}  (effective: '{}')", sanitized, effective_intent);
 
     // Dynamic Entry Node Resolution Pipeline
     let actual_entity = if entity == "Pronoun" {
@@ -88,7 +86,7 @@ fn generate_dynamic_answer(
     let raw_start = resolve_start_node(actual_entity, graph, reasoning, config);
     let start_node = raw_start.unwrap_or_else(|| actual_entity.to_string());
 
-    println!("  [SYS_ORCHESTRATOR]: Geometrically reverse-walked to sentence anchor: [{}]", start_node);
+    eprintln!("  [SYS_ORCHESTRATOR]: Geometrically reverse-walked to sentence anchor: [{}]", start_node);
 
     let mut output = start_node.clone();
     let mut current = start_node;
@@ -124,28 +122,145 @@ fn generate_dynamic_answer(
     output
 }
 
+// ── Server mode structs ────────────────────────────────────────────────────────
+
+/// Incoming JSON request from Flask (written to Rust's stdin).
+#[derive(serde::Deserialize)]
+#[allow(dead_code)]
+struct ServerRequest {
+    query:      String,
+    entity:     String,
+    domain:     String,
+    intent:     String,
+    tone:       String,
+    entities:   Vec<String>,
+    year:       Option<u16>,
+    session_id: String,
+}
+
+/// Outgoing JSON response to Flask (written to Rust's stdout).
+#[derive(serde::Serialize)]
+struct ServerResponse {
+    answer: String,
+    error:  bool,
+}
+
+/// Handle a single classified request in server mode.
+/// Classification (intent/tone/domain/entities) has already been done by Flask.
+fn handle_server_request(req: &ServerRequest, db: &GraphDb, spatial: &SpatialGrid) -> String {
+    eprintln!(
+        "\n[SERVER_REQUEST]: \"{}\"  entity='{}' domain='{}' intent='{}' tone='{}'",
+        req.query, req.entity, req.domain, req.intent, req.tone
+    );
+
+    // Arithmetic interception — bypass graph walk entirely.
+    if is_arithmetic_query(&req.query) {
+        eprintln!("  [GUARDRAIL_6]: Arithmetic query — computing natively.");
+        return evaluate_arithmetic(&req.query)
+            .unwrap_or_else(|| "I couldn't parse that arithmetic expression.".to_string());
+    }
+
+    let depth = compute_depth_limit(&req.entity, db);
+    eprintln!("  [TOPOLOGY]: Entity '{}' → depth_limit={}", req.entity, depth);
+
+    let mut all_entities: Vec<String> = vec![req.entity.clone()];
+    all_entities.extend(req.entities.clone());
+
+    let mut reasoning = ReasoningModule::new(db);
+    reasoning.update_context(&req.intent, &req.tone, &req.domain, &all_entities);
+    let config = WalkConfig {
+        target_year: req.year,
+        depth_limit: depth,
+        mode: WalkMode::from_intent(&req.intent),
+    };
+
+    // Multi-signal reachability guard — structural hallucination prevention.
+    if let Some(secondary) = secondary_signal(&req.query, &req.entity, db) {
+        eprintln!(
+            "  [SYS_ORCHESTRATOR]: Secondary signal -> '{}'. BFS reachability check...",
+            secondary
+        );
+        if !is_reachable(&req.entity, &secondary, db, 10) {
+            return format!(
+                "System Fault: [{}] is not topologically reachable from [{}]. Structural Abort.",
+                secondary, req.entity
+            );
+        }
+    }
+
+    generate_dynamic_answer(&req.query, &req.entity, db, Some(spatial), &mut reasoning, &config)
+}
+
+/// Run the persistent server loop: signal READY, then process one JSON request
+/// per stdin line and write one JSON response per line to stdout.
+/// Never returns — exits when stdin closes.
+fn run_server_mode(db: GraphDb, spatial: SpatialGrid) -> ! {
+    // Signal readiness to Flask (stdout only — stderr is for diagnostics).
+    {
+        let stdout = io::stdout();
+        let mut out = stdout.lock();
+        writeln!(out, "READY").unwrap();
+        out.flush().unwrap();
+    }
+
+    let stdin = io::stdin();
+    for line in stdin.lock().lines() {
+        let line = match line {
+            Ok(l) => l,
+            Err(_) => break,
+        };
+        let line = line.trim().to_string();
+        if line.is_empty() {
+            continue;
+        }
+
+        let resp = match serde_json::from_str::<ServerRequest>(&line) {
+            Ok(req) => {
+                let answer = handle_server_request(&req, &db, &spatial);
+                let error  = answer.starts_with("System Fault");
+                ServerResponse { answer, error }
+            }
+            Err(e) => ServerResponse {
+                answer: format!("Server parse error: {}", e),
+                error:  true,
+            },
+        };
+
+        let stdout = io::stdout();
+        let mut out = stdout.lock();
+        writeln!(out, "{}", serde_json::to_string(&resp).unwrap()).unwrap();
+        out.flush().unwrap();
+    }
+
+    std::process::exit(0);
+}
 
 fn main() {
     let args: Vec<String> = std::env::args().collect();
 
-    // Count only positional args (ignore --flag pairs)
-    let positional_count = {
-        let mut count = 0usize;
-        let mut skip_next = false;
-        for a in args.iter().skip(1) {
-            if skip_next { skip_next = false; continue; }
-            if a.starts_with("--") { skip_next = true; } else { count += 1; }
-        }
-        count
-    };
+    // --server flag enables persistent IPC mode (used by Flask web UI).
+    let server_mode = args.iter().any(|a| a == "--server");
 
-    if positional_count < 3 {
-        eprintln!("Usage: cargo run -- \"<query>\" <entity> <domain> [year] [--session-id ID]");
-        eprintln!("Example: cargo run -- \"Is the server online?\" server tech 2026");
-        std::process::exit(1);
+    if !server_mode {
+        // Count only positional args (ignore --flag pairs)
+        let positional_count = {
+            let mut count = 0usize;
+            let mut skip_next = false;
+            for a in args.iter().skip(1) {
+                if skip_next { skip_next = false; continue; }
+                if a.starts_with("--") { skip_next = true; } else { count += 1; }
+            }
+            count
+        };
+
+        if positional_count < 3 {
+            eprintln!("Usage: cargo run -- \"<query>\" <entity> <domain> [year] [--session-id ID]");
+            eprintln!("       cargo run -- --server   (persistent JSON-IPC mode for Flask)");
+            std::process::exit(1);
+        }
     }
 
-    // Extract optional --session-id flag (can appear anywhere after positional args)
+    // Extract optional --session-id flag (CLI mode only)
     let session_id: String = {
         let mut sid = std::process::id().to_string();
         let mut i = 1usize;
@@ -159,37 +274,29 @@ fn main() {
         sid
     };
 
-    // -----------------------------------------------------------------------
-    // Database connection
-    // Verify the data/ directory is accessible before attempting to open.
-    // GraphDb::open sets PRAGMA busy_timeout=5000, so SQLite will retry for
-    // up to 5 s if another process holds a write lock, then return SQLITE_BUSY
-    // as an Err — which we surface as a fatal exit rather than a panic.
-    // -----------------------------------------------------------------------
+    // ── Database connection ────────────────────────────────────────────────────
     if !std::path::Path::new("data").is_dir() {
         eprintln!("[FATAL] data/ directory not found. Run from the project root.");
         std::process::exit(1);
     }
 
-    println!("[DB] Connecting to data/graph.db ...");
+    eprintln!("[DB] Connecting to data/graph.db ...");
     let db = match GraphDb::open("data/graph.db") {
         Ok(db) => {
-            println!("[DB] Connection established.");
+            eprintln!("[DB] Connection established.");
             db
         }
         Err(e) => {
             eprintln!("[FATAL] Database connection failed: {}", e);
-            eprintln!("[FATAL] The database may be locked (busy_timeout=5 s exceeded) or the");
-            eprintln!("[FATAL] data/ directory may not be writable. Exiting.");
+            eprintln!("[FATAL] The data/ directory may not be writable or the DB is locked.");
             std::process::exit(1);
         }
     };
 
-    // -----------------------------------------------------------------------
-    // First-run corpus ingest
+    // ── First-run corpus ingest ────────────────────────────────────────────────
     // Skip when the DB already has nodes (a previous run built it).
-    // -----------------------------------------------------------------------
     if db.node_count() == 0 {
+        eprintln!("[GRAPH] Empty DB — running first-run ingest...");
         let v2_data = match fs::read_to_string("data/v2_corpus.json") {
             Ok(d) => d,
             Err(e) => {
@@ -227,16 +334,20 @@ fn main() {
         } else {
             String::new()
         };
-        println!("[GRAPH] First-run ingest: V2 ({} sequences){} → DB built.", v2_count, v3_msg);
+        eprintln!("[GRAPH] First-run ingest: V2 ({} sequences){} → DB built.", v2_count, v3_msg);
     }
 
     // Build 3D spatial index from all node positions in the DB.
     let spatial = SpatialGrid::build(db.all_nodes().into_iter().map(|n| (n.id, n.position)));
-    println!("[GRAPH] {} nodes / {} edges | Spatial index ready.", db.node_count(), db.edge_count());
+    eprintln!("[GRAPH] {} nodes / {} edges | Spatial index ready.", db.node_count(), db.edge_count());
 
-    // -----------------------------------------------------------------------
-    // CLI query
-    // -----------------------------------------------------------------------
+    // ── Server mode ────────────────────────────────────────────────────────────
+    if server_mode {
+        run_server_mode(db, spatial);
+        // run_server_mode never returns (exits on stdin close)
+    }
+
+    // ── CLI query mode ─────────────────────────────────────────────────────────
     let query  = &args[1];
     let entity = &args[2];
     let domain = &args[3];

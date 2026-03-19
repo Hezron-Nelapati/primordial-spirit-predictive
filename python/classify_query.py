@@ -22,6 +22,15 @@ os.environ.setdefault("TOKENIZERS_PARALLELISM", "false")
 import nltk
 from sentence_transformers import SentenceTransformer
 
+# ── Absolute default centroids path (works regardless of caller's CWD) ───────
+_MODULE_DIR = os.path.dirname(os.path.abspath(__file__))
+_DEFAULT_CENTROIDS = os.path.join(_MODULE_DIR, "..", "data", "centroids.json")
+
+# ── Module-level singletons — loaded once, reused for every classify() call ──
+_model: SentenceTransformer | None = None
+_store: dict | None                = None
+_nlp                               = None   # spaCy model or False (unavailable)
+
 # ── NER entity types to extract (spaCy label set) ────────────────────────────
 NER_TYPES = {"PERSON", "ORG", "GPE", "PRODUCT"}
 
@@ -83,32 +92,58 @@ def _keyword_domain(text: str) -> str:
     return "general"
 
 
+def _get_model() -> SentenceTransformer:
+    global _model
+    if _model is None:
+        print("  [classify_query]: loading sentence-transformer model (once)…", file=sys.stderr)
+        _model = SentenceTransformer("all-MiniLM-L6-v2")
+    return _model
+
+
+def _get_store(centroids_path: str = _DEFAULT_CENTROIDS) -> dict:
+    global _store
+    if _store is None:
+        with open(centroids_path) as f:
+            _store = json.load(f)
+    return _store
+
+
+def _get_nlp():
+    global _nlp
+    if _nlp is None:
+        try:
+            import spacy
+            _nlp = spacy.load("en_core_web_sm")
+            print("  [classify_query]: spaCy en_core_web_sm loaded (once).", file=sys.stderr)
+        except (ImportError, OSError) as exc:
+            print(f"  [classify_query]: spaCy unavailable ({exc}) — NER disabled.", file=sys.stderr)
+            _nlp = False
+    return _nlp
+
+
 def _ner_entities(text: str) -> list:
     """Extract named entity surface strings from text using spaCy en_core_web_sm.
     Returns an empty list if spaCy or its model is unavailable — callers must
     treat [] as a valid (no-entity) response rather than an error.
     """
+    nlp = _get_nlp()
+    if not nlp:
+        return []
     try:
-        import spacy
-        nlp = spacy.load("en_core_web_sm")
         doc = nlp(text)
         entities = [ent.text for ent in doc.ents if ent.label_ in NER_TYPES]
         print(f"  [classify_query]: NER extracted {entities}", file=sys.stderr)
         return entities
-    except (ImportError, OSError) as exc:
-        print(f"  [classify_query]: spaCy NER unavailable ({exc}) — entities=[]", file=sys.stderr)
+    except Exception as exc:
+        print(f"  [classify_query]: NER failed ({exc})", file=sys.stderr)
         return []
 
 
-def classify(query: str, centroids_path: str = "data/centroids.json",
+def classify(query: str, centroids_path: str = _DEFAULT_CENTROIDS,
              session_id: str | None = None) -> dict:
     _ensure_nltk()
-
-    print("  [classify_query]: Loading sentence-transformer model...", file=sys.stderr)
-    model = SentenceTransformer("all-MiniLM-L6-v2")
-
-    with open(centroids_path) as f:
-        store = json.load(f)
+    model = _get_model()
+    store = _get_store(centroids_path)
 
     # Full-text embedding
     raw_emb = model.encode(query)

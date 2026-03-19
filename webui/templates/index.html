@@ -107,6 +107,13 @@
       flex-direction: column;
       gap: 1.2rem;
       scroll-behavior: smooth;
+      justify-content: flex-end;
+    }
+
+    /* Spacer so messages anchor to bottom when thread is short */
+    .chat-messages::before {
+      content: '';
+      flex: 1 1 auto;
     }
 
     .chat-messages::-webkit-scrollbar { width: 4px; }
@@ -142,6 +149,7 @@
       font-size: 0.92rem;
       line-height: 1.55;
       max-width: calc(100% - 40px);
+      min-width: 2.5rem;
       word-break: break-word;
     }
 
@@ -667,6 +675,8 @@ function appendMessage(role, html, meta, trace) {
   avatar.textContent = role === 'user' ? 'U' : 'AI';
 
   const right = document.createElement('div');
+  right.style.cssText = 'min-width:0; max-width:calc(100% - 40px); display:flex; flex-direction:column;'
+  + (role === 'user' ? 'align-items:flex-end;' : 'align-items:flex-start;');
 
   const bubble = document.createElement('div');
   bubble.className = 'bubble';

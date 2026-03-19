@@ -4,91 +4,135 @@ Flask web UI server for SPSE Predictive.
 Routes
 ------
 GET  /                  → chat UI
-POST /query             → {"query": "..."} — auto-extracts entity/domain
+POST /query             → {"query": "..."} — classifies in-process, queries Rust IPC
 POST /train/start       → {"passes": N}  — starts training pipeline in background
 GET  /train/stream      → SSE stream of training log (param: offset=N)
 GET  /train/status      → {running, done, error, log_lines}
+
+Architecture
+------------
+At startup:
+  1. classify_query and minillm_wrapper are imported as modules (models loaded once).
+  2. Rust binary is started with --server flag as a persistent subprocess.
+  3. Flask waits for "READY" from Rust (DB built + spatial index ready).
+
+Per-query:
+  1. classify_query.classify() → intent/tone/domain/entities  (in-process, ~0 ms)
+  2. _query_rust() JSON IPC → graph fact                       (persistent process)
+  3. minillm_wrapper.style() → conversational answer           (in-process, ~0 ms)
 """
-import json, os, re, secrets, subprocess, sys, threading
+import json, os, re, secrets, subprocess, sys, threading, time
 
 from flask import Flask, Response, jsonify, render_template, request, session
 
 app = Flask(__name__)
 app.secret_key = os.environ.get("FLASK_SECRET", secrets.token_hex(32))
 
-ROOT   = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
-BINARY = os.environ.get(
+ROOT       = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
+PYTHON_DIR = os.path.join(ROOT, "python")
+BINARY     = os.environ.get(
     "SPSE_BINARY",
     os.path.join(ROOT, "target", "release", "spse_predictive"),
 )
 
-# ── Training state ────────────────────────────────────────────────────────────
-_tstate = {"running": False, "done": False, "error": None, "log": []}
-_tlock  = threading.Lock()
+# ── In-process Python models ──────────────────────────────────────────────────
+# Add python/ to path so we can import classify_query and minillm_wrapper directly.
+sys.path.insert(0, PYTHON_DIR)
 
-# ── Entity / domain inference ─────────────────────────────────────────────────
-_STOPWORDS = {
-    "what", "when", "where", "why", "how", "is", "are", "was", "were", "the",
-    "a", "an", "and", "or", "but", "do", "does", "did", "can", "could",
-    "would", "should", "will", "have", "has", "had", "be", "been", "being",
-    "i", "you", "he", "she", "it", "we", "they", "me", "him", "her", "us",
-    "them", "my", "your", "his", "its", "tell", "show", "give", "make",
-    "get", "let", "go", "who", "which", "that", "this", "these", "those",
-    "not", "no", "please", "about", "from", "into", "over", "under",
-    "between", "explain", "describe", "define", "find", "list",
-}
+_classify  = None   # classify_query module
+_style_fn  = None   # minillm_wrapper.style function
 
-_DOMAIN_KEYWORDS = {
-    "tech":      {"server", "cpu", "api", "network", "router", "code", "software",
-                  "hardware", "database", "computer", "program", "bug", "memory",
-                  "disk", "online", "internet", "cloud", "algorithm", "cache",
-                  "kernel", "binary", "compiler", "runtime"},
-    "finance":   {"bank", "money", "loan", "credit", "interest", "investment",
-                  "stock", "market", "cash", "fund", "atm", "currency", "price",
-                  "cost", "budget", "revenue", "profit", "tax", "asset", "liability",
-                  "dividend", "inflation", "equity"},
-    "science":   {"quantum", "physics", "chemistry", "biology", "atom", "molecule",
-                  "energy", "force", "mass", "particle", "gravity", "light", "wave",
-                  "electron", "proton", "experiment", "theory", "hypothesis",
-                  "equation", "nucleus", "velocity"},
-    "geography": {"city", "country", "capital", "continent", "ocean", "river",
-                  "mountain", "paris", "london", "amazon", "europe", "africa",
-                  "asia", "america", "climate", "geography", "region", "nation",
-                  "lake", "desert", "island"},
-}
-
-
-def _extract_entity(query: str) -> str:
-    """Extract the most semantically important word using NLTK POS tagging."""
+def _load_python_models():
+    """Import and warm up classify_query + minillm_wrapper (called once at startup)."""
+    global _classify, _style_fn
     try:
-        import nltk
-        # Ensure punkt available (silent; already downloaded in Docker)
-        tokens = nltk.word_tokenize(query.lower())
-        tagged = nltk.pos_tag(tokens)
-        # Prefer proper noun → common noun, skip stopwords and short tokens
-        for tag_group in [("NNP", "NNPS"), ("NN", "NNS")]:
-            for word, tag in tagged:
-                if (tag in tag_group
-                        and word not in _STOPWORDS
-                        and word.isalpha()
-                        and len(word) > 2):
-                    return word
-    except Exception:
-        pass
-    # Fallback: first content word (no ML required)
-    for word in query.lower().split():
-        w = re.sub(r"[^a-z]", "", word)
-        if w and w not in _STOPWORDS and len(w) > 2:
-            return w
-    return re.sub(r"[^a-z]", "", query.split()[0].lower()) if query.split() else "query"
+        import classify_query as cq
+        cq._get_model()   # pre-load sentence-transformer
+        cq._get_nlp()     # pre-load spaCy NER
+        _classify = cq
+        print("[FLASK] classify_query model loaded.", flush=True)
+    except Exception as exc:
+        print(f"[FLASK] WARNING: classify_query unavailable ({exc}).", flush=True)
+
+    try:
+        import minillm_wrapper as mw
+        mw.load_model()   # pre-load SmolLM2 pipeline
+        _style_fn = mw.style
+        print("[FLASK] minillm_wrapper model loaded.", flush=True)
+    except Exception as exc:
+        print(f"[FLASK] WARNING: minillm_wrapper unavailable ({exc}).", flush=True)
 
 
-def _infer_domain(query: str) -> str:
-    words = set(re.sub(r"[^a-z ]", " ", query.lower()).split())
-    for domain, kws in _DOMAIN_KEYWORDS.items():
-        if words & kws:
-            return domain
-    return "general"
+# ── Persistent Rust process ───────────────────────────────────────────────────
+_rust_proc  = None
+_rust_lock  = threading.Lock()   # serialize JSON IPC calls (one at a time)
+_rust_ready = False
+
+def _start_rust():
+    """Start Rust binary with --server flag, wait for READY signal."""
+    global _rust_proc, _rust_ready
+
+    if not os.path.isfile(BINARY):
+        print(f"[FLASK] WARNING: Rust binary not found at {BINARY}. Queries will fail.", flush=True)
+        return
+
+    try:
+        _rust_proc = subprocess.Popen(
+            [BINARY, "--server"],
+            stdin=subprocess.PIPE,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,   # diagnostics go to container logs
+            text=True,
+            cwd=ROOT,
+            bufsize=1,                # line-buffered
+        )
+        # Forward Rust stderr to our own stdout so it appears in Docker logs.
+        def _fwd_stderr():
+            for line in iter(_rust_proc.stderr.readline, ""):
+                print(f"[RUST] {line}", end="", flush=True)
+        threading.Thread(target=_fwd_stderr, daemon=True).start()
+
+        # Wait for READY signal (DB built + spatial index ready).
+        print("[FLASK] Waiting for Rust to signal READY...", flush=True)
+        deadline = time.time() + 120  # up to 2 min for first-run ingest
+        while time.time() < deadline:
+            line = _rust_proc.stdout.readline()
+            if not line:
+                break
+            line = line.strip()
+            if line == "READY":
+                _rust_ready = True
+                print("[FLASK] Rust server ready. System online.", flush=True)
+                return
+            # Any non-READY line before READY is unexpected — log it.
+            print(f"[FLASK/RUST] {line}", flush=True)
+
+        print("[FLASK] WARNING: Rust did not send READY within timeout.", flush=True)
+    except Exception as exc:
+        print(f"[FLASK] WARNING: Could not start Rust binary ({exc}).", flush=True)
+
+
+def _query_rust(payload: dict) -> dict:
+    """Send a JSON request to the persistent Rust process and return its JSON response."""
+    global _rust_proc, _rust_ready
+
+    if not _rust_ready or _rust_proc is None or _rust_proc.poll() is not None:
+        return {"answer": "Graph engine not ready. Wait for startup or run Training first.",
+                "error": True}
+
+    with _rust_lock:
+        try:
+            line = json.dumps(payload) + "\n"
+            _rust_proc.stdin.write(line)
+            _rust_proc.stdin.flush()
+            resp_line = _rust_proc.stdout.readline()
+            if not resp_line:
+                _rust_ready = False
+                return {"answer": "Graph engine disconnected.", "error": True}
+            return json.loads(resp_line.strip())
+        except Exception as exc:
+            _rust_ready = False
+            return {"answer": f"Graph engine IPC error: {exc}", "error": True}
 
 
 # ── Session ID ────────────────────────────────────────────────────────────────
@@ -100,47 +144,76 @@ def _session_id() -> str:
 
 # ── Query runner ──────────────────────────────────────────────────────────────
 def _run_query(query: str, sid: str) -> dict:
-    entity = _extract_entity(query)
-    domain = _infer_domain(query)
+    # Step 1: Classify in-process (intent / tone / domain / entities / NER)
+    entity  = "query"
+    domain  = "general"
+    intent  = "question"
+    tone    = "neutral"
+    entities: list = []
+
+    if _classify is not None:
+        try:
+            cls = _classify.classify(query, session_id=sid)
+            intent   = cls.get("intent", "question")
+            tone     = cls.get("tone",   "neutral")
+            domain   = cls.get("domain", "general")
+            entities = cls.get("entities", [])
+            # Pick entity: first NER entity, or extract from POS tags
+            if entities:
+                entity = entities[0].lower()
+            else:
+                entity = _classify._pos_filter(query, _classify.DOMAIN_TAGS).split()[0].lower() \
+                         if _classify._pos_filter(query, _classify.DOMAIN_TAGS).split() else "query"
+        except Exception as exc:
+            print(f"[FLASK] classify failed ({exc}) — using defaults.", flush=True)
+    else:
+        # Fallback: extract first content word
+        stopwords = {"what", "when", "where", "why", "how", "is", "are", "the", "a", "an",
+                     "and", "or", "do", "does", "can", "tell", "show", "give"}
+        for word in re.sub(r"[^a-z ]", " ", query.lower()).split():
+            if word not in stopwords and len(word) > 2:
+                entity = word
+                break
 
     # Year from query text (4-digit 1900–2099)
     ym = re.search(r"\b(19|20)\d{2}\b", query)
-    year = ym.group(0) if ym else None
+    year = int(ym.group(0)) if ym else None
 
-    cmd = [BINARY, query, entity, domain]
-    if year:
-        cmd.append(year)
-    cmd += ["--session-id", sid]
+    # Step 2: Query Rust via persistent IPC
+    payload = {
+        "query":      query,
+        "entity":     entity,
+        "domain":     domain,
+        "intent":     intent,
+        "tone":       tone,
+        "entities":   entities,
+        "year":       year,
+        "session_id": sid,
+    }
+    rust_resp = _query_rust(payload)
+    graph_fact = rust_resp.get("answer", "")
+    is_error   = rust_resp.get("error", True)
 
-    try:
-        result = subprocess.run(cmd, capture_output=True, text=True, timeout=60, cwd=ROOT)
-    except subprocess.TimeoutExpired:
-        return {
-            "answer": "Query timed out (60 s). The graph may still be building.",
-            "trace": "", "entity": entity, "domain": domain, "error": True,
-        }
-    except FileNotFoundError:
-        return {
-            "answer": (
-                "Binary not found. "
-                "Run `cargo build --release` locally, or rebuild the Docker image."
-            ),
-            "trace": "", "entity": entity, "domain": domain, "error": True,
-        }
+    # Step 3: Style through miniLLM in-process (skip on error or System Fault)
+    if not is_error and _style_fn is not None and "System Fault" not in graph_fact:
+        try:
+            graph_fact = _style_fn(graph_fact, query)
+        except Exception as exc:
+            print(f"[FLASK] miniLLM style failed ({exc}) — using raw fact.", flush=True)
 
-    stdout = result.stdout
-    answer = None
-    for line in stdout.splitlines():
-        m = re.search(r'\[BOT_OUTPUT\]:\s*"(.+)"', line)
-        if m:
-            answer = m.group(1)
-            break
+    return {
+        "answer": graph_fact,
+        "entity": entity,
+        "domain": domain,
+        "intent": intent,
+        "tone":   tone,
+        "error":  is_error,
+    }
 
-    if answer is None:
-        fallback = result.stderr.strip() or "No answer produced — try running Training first."
-        return {"answer": fallback, "trace": stdout, "entity": entity, "domain": domain, "error": True}
 
-    return {"answer": answer, "trace": stdout, "entity": entity, "domain": domain, "error": False}
+# ── Training state ────────────────────────────────────────────────────────────
+_tstate = {"running": False, "done": False, "error": None, "log": []}
+_tlock  = threading.Lock()
 
 
 # ── Routes ────────────────────────────────────────────────────────────────────
@@ -154,8 +227,7 @@ def query():
     data = request.get_json(force=True) or {}
     q = (data.get("query") or "").strip()
     if not q:
-        return jsonify({"answer": "Please enter a message.", "trace": "",
-                        "entity": "", "domain": "", "error": True}), 400
+        return jsonify({"answer": "Please enter a message.", "error": True}), 400
     return jsonify(_run_query(q, _session_id()))
 
 
@@ -165,7 +237,7 @@ def train_start():
     with _tlock:
         if _tstate["running"]:
             return jsonify({"error": "Training already in progress"}), 400
-        data  = request.get_json(force=True) or {}
+        data   = request.get_json(force=True) or {}
         passes = max(10, int(data.get("passes", 10)))
         _tstate.update({"running": True, "done": False, "error": None, "log": []})
 
@@ -198,7 +270,6 @@ def train_stream():
     offset = int(request.args.get("offset", 0))
 
     def generate():
-        import time
         sent = offset
         while True:
             with _tlock:
@@ -236,6 +307,21 @@ def train_status():
         })
 
 
+@app.route("/health")
+def health():
+    return jsonify({"ready": _rust_ready, "rust": _rust_proc is not None})
+
+
+# ── Startup ───────────────────────────────────────────────────────────────────
+def _startup():
+    """Called once before Flask starts serving requests."""
+    print("[FLASK] Loading Python ML models...", flush=True)
+    _load_python_models()
+    print("[FLASK] Starting Rust graph engine...", flush=True)
+    _start_rust()
+
+
 if __name__ == "__main__":
+    _startup()
     port = int(os.environ.get("PORT", 5000))
     app.run(host="0.0.0.0", port=port, debug=False)
