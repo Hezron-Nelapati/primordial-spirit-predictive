@@ -8,4 +8,4 @@ spacy==3.8.11
 flask==3.1.3
 # torch is pre-installed in the pytorch/pytorch base image (with CUDA).
 # Listed here so local non-Docker runs still work.
-torch==2.3.0
+torch==2.8.0
