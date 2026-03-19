@@ -33,9 +33,14 @@ impl WalkMode {
 }
 
 pub struct WalkConfig {
-    pub target_year: Option<u16>,
-    pub depth_limit: usize,
-    pub mode: WalkMode,
+    pub target_year:   Option<u16>,
+    pub depth_limit:   usize,
+    pub mode:          WalkMode,
+    /// All meaningful tokens from the original query (lowercased).
+    /// Used to boost edges that lead toward any query-relevant node,
+    /// giving multi-word queries ("James Clark Ross") disambiguation
+    /// that a single entity anchor cannot provide alone.
+    pub query_tokens:  Vec<String>,
 }
 
 pub fn predict_next(
@@ -91,7 +96,9 @@ pub fn predict_next(
         eprintln!("    [TRACE] Validating {} outgoing pathways geometrically...", edges.len());
         return match config.mode {
             WalkMode::Explain  => score_edges_explain(&edges, graph),
-            WalkMode::Question => score_edges_question(&edges, graph, active_entity),
+            WalkMode::Question => {
+                score_edges_question(&edges, graph, active_entity, &config.query_tokens)
+            },
             WalkMode::Forward  => score_edges(&edges, graph, active_intent, active_domain, active_tone, active_entity, config),
         };
     }
@@ -128,7 +135,10 @@ pub fn predict_next(
         if !tier2_edges.is_empty() {
             eprintln!("    [TIER_2] No direct edges — centroid radial search found {} candidate edges from {} neighbours.",
                 tier2_edges.len(), neighbours.len());
-            return score_edges(&tier2_edges, graph, active_intent, active_domain, active_tone, active_entity, config);
+            return match config.mode {
+                WalkMode::Question => score_edges_question(&tier2_edges, graph, active_entity, &config.query_tokens),
+                _ => score_edges(&tier2_edges, graph, active_intent, active_domain, active_tone, active_entity, config),
+            };
         }
     }
 
@@ -206,28 +216,102 @@ fn score_edges_question(
     edges: &[WordEdge],
     graph: &dyn GraphAccess,
     active_entity: &str,
+    query_tokens:  &[String],
 ) -> Option<String> {
-    let target_id = match graph.surface_to_id(active_entity) {
-        Some(id) => id,
-        None => {
-            // No known entity anchor — fall back to first candidate.
-            return edges.first().and_then(|e| graph.node_by_id(e.to).map(|n| n.surface));
+    // Build a merged distance map: for each anchor (active_entity + all query
+    // tokens that exist in the graph), run a reverse-BFS and keep the minimum
+    // distance to any anchor for each node.  This routes the walk toward
+    // whichever query-relevant node is topologically nearest — essential for
+    // multi-word queries like "James Clark Ross" where a single anchor ("Ross")
+    // is too ambiguous, but {"James","Clark","Ross"} together constrain the path.
+    // Build anchor set: try the raw form, lowercase, and title-case for each word.
+    // The graph stores corpus tokens with their original capitalisation (e.g. "James"
+    // not "james"), so lowercase query_tokens would otherwise all resolve to None.
+    let mut anchor_set: std::collections::HashSet<u64> = std::collections::HashSet::new();
+    let words: Vec<&str> = std::iter::once(active_entity)
+        .chain(query_tokens.iter().map(String::as_str))
+        .flat_map(|w| w.split_whitespace())  // expand multi-word entities into individual words
+        .collect();
+    for w in &words {
+        if let Some(id) = graph.surface_to_id(w) { anchor_set.insert(id); }
+        // Try lowercase
+        let lc = w.to_lowercase();
+        if let Some(id) = graph.surface_to_id(&lc) { anchor_set.insert(id); }
+        // Try title-case (first letter upper, rest lower) — matches how corpus stores proper nouns
+        if let Some(first) = lc.chars().next() {
+            let tc: String = first.to_uppercase().collect::<String>() + &lc[first.len_utf8()..];
+            if let Some(id) = graph.surface_to_id(&tc) { anchor_set.insert(id); }
+        }
+    }
+    let anchors: Vec<u64> = anchor_set.into_iter().collect();
+
+    if anchors.is_empty() {
+        return edges.first().and_then(|e| graph.node_by_id(e.to).map(|n| n.surface));
+    }
+
+    // Merge BFS distance maps: node → minimum hops to any anchor.
+    let mut merged: HashMap<u64, usize> = HashMap::new();
+    for anchor_id in &anchors {
+        for (node, hops) in reverse_bfs_distances(*anchor_id, graph, 2) {
+            let entry = merged.entry(node).or_insert(usize::MAX);
+            if hops < *entry { *entry = hops; }
+        }
+    }
+
+    // Count entity-token matches for each edge.
+    let match_count = |e: &WordEdge| -> usize {
+        if let Some(ref ent) = e.entity {
+            let ent_lower = ent.to_lowercase();
+            query_tokens.iter().filter(|t| ent_lower.contains(t.as_str())).count()
+        } else { 0 }
+    };
+
+    // Find the best entity-match count across all edges.
+    let max_matches = edges.iter().map(|e| match_count(e)).max().unwrap_or(0);
+
+    let best = if max_matches >= 1 {
+        // Strong entity signal: pick the edge with the most query-token matches,
+        // preferring content words (non-punctuation) over punctuation on ties,
+        // then highest edge weight as final tiebreaker.
+        // This routes the walk through article-specific content (e.g.
+        // Ross→discovers rather than Ross→, when both have entity="James Clark Ross").
+        let is_punct_id = |id: u64| -> bool {
+            graph.node_by_id(id).map(|n| matches!(n.surface.as_str(),
+                "," | "." | "!" | "?" | ";" | ":" | "\"" | "'" | "''" | "`" | "(" | ")"
+            )).unwrap_or(false)
+        };
+        edges.iter().max_by_key(|e| {
+            let m = match_count(e);
+            let not_punct: usize = if is_punct_id(e.to) { 0 } else { 1 };
+            let w = (e.weight * 100.0) as u64;
+            (m, not_punct, w)
+        })
+    } else {
+        // Weak or no entity signal: prefer BFS-distance routing so the walk
+        // stays topologically close to the query anchors.  When all BFS
+        // distances are ∞ (nodes ahead in the corpus are not predecessors of
+        // the anchor in the reverse-BFS sense), fall back to highest-weight
+        // non-punctuation edge so the walk follows the most-traversed path
+        // rather than picking the first edge arbitrarily.
+        let all_inf = edges.iter().all(|e| !merged.contains_key(&e.to));
+        if all_inf {
+            let is_punct_id = |id: u64| -> bool {
+                graph.node_by_id(id).map(|n| matches!(n.surface.as_str(),
+                    "," | "." | "!" | "?" | ";" | ":" | "\"" | "'" | "''" | "`" | "(" | ")"
+                )).unwrap_or(false)
+            };
+            // Prefer content words; among those take the highest-weight edge.
+            let content: Vec<&WordEdge> = edges.iter().filter(|e| !is_punct_id(e.to)).collect();
+            let pool = if content.is_empty() { edges.iter().collect::<Vec<_>>() } else { content };
+            pool.into_iter().max_by_key(|e| (e.weight * 1000.0) as u64)
+        } else {
+            edges.iter().min_by_key(|e| {
+                merged.get(&e.to).copied().unwrap_or(usize::MAX)
+            })
         }
     };
 
-    // One reverse-BFS from target; look up each candidate in the result map.
-    // max_hops=2 keeps the BFS within a small predecessor neighbourhood — hub
-    // nodes like "network" (30k+ edges) make deeper BFS traverse most of the
-    // graph on every single walk step, causing timeouts.
-    let dist = reverse_bfs_distances(target_id, graph, 2);
-    let best = edges.iter()
-        .min_by_key(|e| dist.get(&e.to).copied().unwrap_or(usize::MAX));
-
-    best.and_then(|e| graph.node_by_id(e.to).map(|n| {
-        eprintln!("      [QUESTION_MODE] Selected node [{}] as closest to entity anchor [{}].",
-            n.surface, active_entity);
-        n.surface
-    }))
+    best.and_then(|e| graph.node_by_id(e.to).map(|n| n.surface))
 }
 
 /// Single backward BFS from `target_id` following reverse edges.
@@ -287,9 +371,32 @@ fn score_edges(
             adj_weight *= 2.0;
             eprintln!("         ↳ Tone Match '{}': Weight * 2.0 (New: {:.2})", active_tone, adj_weight);
         }
-        if !active_entity.is_empty() && edge.entity.as_deref() == Some(active_entity) {
-            adj_weight *= 1.5;
-            eprintln!("         ↳ Entity Match '{}': Weight * 1.5 (New: {:.2})", active_entity, adj_weight);
+
+        // Entity signal: multiplicative per-token boost against the edge's
+        // training-time entity label.  Each query token that appears in the edge
+        // entity label multiplies the weight by 1.5 independently.
+        //
+        // Why multiplicative?  "betsy ross" matches 1 token ("ross") → ×1.5.
+        // "James Clark Ross" matches 3 tokens ("james","clark","ross") → ×1.5³=×3.375.
+        // A two-fold edge weight difference (betsy_weight=2 vs jcr_weight=1) is
+        // overcome: 2×1.5=3.0 < 1×3.375=3.375 → the more-specific match wins.
+        if let Some(ref edge_ent) = edge.entity {
+            let edge_lower = edge_ent.to_lowercase();
+            let mut token_mult = 1.0f32;
+            // Primary entity (single token, sent by Flask)
+            if !active_entity.is_empty() && edge_lower.contains(&active_entity.to_lowercase()) {
+                token_mult *= 1.5;
+            }
+            // All query tokens (disambiguate multi-word entities)
+            for qt in &config.query_tokens {
+                if edge_lower.contains(qt.as_str()) {
+                    token_mult *= 1.5;
+                }
+            }
+            if token_mult > 1.0 {
+                adj_weight *= token_mult;
+                eprintln!("         ↳ Query-token Entity Match ('{}'): Weight * {:.2} (New: {:.2})", edge_ent, token_mult, adj_weight);
+            }
         }
 
         // Guardrail 5: Axiomatic Hallucination (Temporal Tie-Breaking)
@@ -371,6 +478,17 @@ pub fn resolve_start_node(
 
     eprintln!("  [SYS_ORCHESTRATOR]: Jumping onto Target Entity Node: [{}]", entity_word);
 
+    // If the entity word itself is one of the query tokens (e.g. "Brighton" for
+    // "Tell me about Brighton"), the entity IS the best start for the forward walk.
+    // Walking backward would land in a generic comma/hub predecessor, losing context.
+    if !config.query_tokens.is_empty() {
+        let ew_lower = entity_word.to_lowercase();
+        if config.query_tokens.iter().any(|t| *t == ew_lower) {
+            eprintln!("  [SYS_ORCHESTRATOR]: Entity is itself a query token — using as start node directly.");
+            return Some(entity_word.to_string());
+        }
+    }
+
     for _ in 0..20 {
         let incoming = graph.edges_to(current_id);
         if incoming.is_empty() { break; }
@@ -388,6 +506,23 @@ pub fn resolve_start_node(
                 if tm < 1.0 { tm = 1.0; }
                 adj_weight *= tm;
             }
+            // Query-token context boost: each query token that appears in the
+            // edge entity label multiplies adj_weight by 5.0.
+            // Example: query "James Clark Ross" → tokens ["james","clark","ross"]
+            //   Clark→Ross (entity "James Clark Ross", weight 20): 3 matches → 5³=125 → 2500
+            //   Diana→Ross (entity "Diana Ross", weight 140):       1 match  → 5¹=5   → 700
+            //   2500 > 700 → Clark wins, walk starts in correct article.
+            if !config.query_tokens.is_empty() {
+                if let Some(ref edge_ent) = edge.entity {
+                    let edge_lower = edge_ent.to_lowercase();
+                    let matches = config.query_tokens.iter()
+                        .filter(|t| edge_lower.contains(t.as_str()))
+                        .count();
+                    if matches > 0 {
+                        adj_weight *= (5.0f32).powi(matches as i32);
+                    }
+                }
+            }
             if adj_weight > highest_weight {
                 highest_weight = adj_weight;
                 best_prev = Some(edge.clone());
@@ -396,9 +531,21 @@ pub fn resolve_start_node(
 
         if let Some(edge) = best_prev {
             let prev_surface = graph.node_by_id(edge.from).map(|n| n.surface).unwrap_or_default();
-            // Fix #2: check punctuation BEFORE updating current_id so we never
-            // land on a sentence-boundary node as the returned start node.
-            if prev_surface == "." || prev_surface == "?" || prev_surface == "!" {
+            // Stop before any sentence-boundary or list-separator token.
+            // `''`, `` ` ``, `–`, `-` are Wikipedia corpus boundary markers;
+            // without this guard resolve_start_node walks into shared hub nodes
+            // with thousands of outgoing edges, destroying query context.
+            if matches!(prev_surface.as_str(), "." | "?" | "!" | "''" | "`" | "``" | "–" | "-" | "—" | "(" | ")") {
+                break;
+            }
+            // Also stop if the predecessor surface is itself a query token:
+            // staying at "James" or "Clark" is a better forward-walk start
+            // than backtracking past it into a shared punctuation hub.
+            let prev_lower = prev_surface.to_lowercase();
+            if !config.query_tokens.is_empty()
+                && config.query_tokens.iter().any(|t| *t == prev_lower)
+            {
+                current_id = edge.from;
                 break;
             }
             current_id = edge.from;

@@ -105,9 +105,18 @@ fn generate_dynamic_answer(
     const POS_WINDOW: usize = 5;
     let mut pos_history: Vec<[f32; 3]> = Vec::with_capacity(POS_WINDOW);
 
-    for _ in 0..50 {
+    // Question-mode cap: stop after at most 20 total steps even if no sentence
+    // terminator is found.  Entity-signal loss at common function words (of, the,
+    // as) causes unbounded divergence without this guard.
+    let max_steps: usize = if matches!(config.mode, WalkMode::Question) { 20 } else { 50 };
+    for _ in 0..max_steps {
         // Vec<[f32; 3]> derefs to &[[f32; 3]] — no intermediate allocation needed.
         if let Some(next_word) = predict_next(&current, graph, spatial, reasoning, config, &pos_history) {
+            // Halt immediately on corpus sentence-boundary markers — these are
+            // Wikipedia ingest artifacts that should never appear in answers.
+            if matches!(next_word.as_str(), "''" | "``" | "`") {
+                break;
+            }
             // Cycle guard: skip already-visited content words.  Punctuation is
             // exempt so commas/periods can appear more than once (natural text).
             let is_punct = matches!(next_word.as_str(), "." | "," | "!" | "?" | ";" | ":" | "\"" | "'");
@@ -188,19 +197,63 @@ fn handle_server_request(
         return (answer, session);
     }
 
-    let depth = compute_depth_limit(&req.entity, db);
+    // Compute effective walk mode first so depth_limit can use it.
+    // Social intents (greeting/gratitude/farewell) with NER entities are
+    // upgraded to Question mode — e.g. "Tell me about Brighton".
+    let social_intent = matches!(req.intent.as_str(), "greeting" | "gratitude" | "farewell");
+    let effective_mode = if social_intent && !req.entities.is_empty() {
+        WalkMode::Question
+    } else {
+        WalkMode::from_intent(&req.intent)
+    };
+
+    let depth = {
+        let raw = compute_depth_limit(&req.entity, db);
+        // Question-mode answers should be one focused sentence; cap at 1 so the
+        // walk stops once the entity context is delivered without trailing noise.
+        if matches!(effective_mode, WalkMode::Question) { raw.min(1) } else { raw }
+    };
     eprintln!("  [TOPOLOGY]: Entity '{}' → depth_limit={}", req.entity, depth);
 
     let mut all_entities: Vec<String> = vec![req.entity.clone()];
     all_entities.extend(req.entities.clone());
 
+    // Build query_tokens: all meaningful words from the raw query (lowercased,
+    // length > 2, not pure punctuation).  Combined with all_entities these give
+    // the walk scorer a full picture of the query's context so it can route
+    // toward ANY relevant word, not just the single primary entity.
+    // e.g. "James Clark Ross" → ["james", "clark", "ross", "james clark ross"]
+    let stop: HashSet<&str> = ["the","a","an","is","are","was","were","of","in",
+        "to","and","or","for","at","on","by","with","from","that","this","it",
+        // Question-word pronouns: keep as text but don't use as graph anchors
+        // (e.g. "who" in "Who is Donkey Kong" should not anchor to "The Who")
+        "who","what","when","where","why","how","tell","about","give","show",
+        "me","my","your","its","our","they","them","their","we","you","he","she"]
+        .iter().copied().collect();
+    let mut query_tokens: Vec<String> = req.query
+        .split_whitespace()
+        .map(|w| w.trim_matches(|c: char| c.is_ascii_punctuation()).to_lowercase())
+        .filter(|w| w.len() > 2 && !stop.contains(w.as_str()))
+        .collect();
+    // Also include the un-lowercased entity tokens so case-sensitive graph
+    // lookups can match corpus-capitalised surfaces.
+    for ent in &all_entities {
+        for word in ent.split_whitespace() {
+            let lc = word.to_lowercase();
+            if lc.len() > 2 && !stop.contains(lc.as_str()) && !query_tokens.contains(&lc) {
+                query_tokens.push(lc);
+            }
+        }
+    }
+
     // Restore the caller's session so multi-turn context accumulates correctly.
     let mut reasoning = ReasoningModule::with_session(db, session);
     reasoning.update_context(&req.intent, &req.tone, &req.domain, &all_entities);
     let config = WalkConfig {
-        target_year: req.year,
-        depth_limit: depth,
-        mode: WalkMode::from_intent(&req.intent),
+        target_year:  req.year,
+        depth_limit:  depth.max(1),
+        mode:         effective_mode,
+        query_tokens,
     };
 
     // Multi-signal reachability guard — structural hallucination prevention.
@@ -458,7 +511,7 @@ fn main() {
 
     let mut reasoning = ReasoningModule::new(&db);
     reasoning.update_context(&intent, &tone, &effective_domain, &all_entities);
-    let config = WalkConfig { target_year: year, depth_limit: depth, mode: WalkMode::from_intent(&intent) };
+    let config = WalkConfig { target_year: year, depth_limit: depth, mode: WalkMode::from_intent(&intent), query_tokens: vec![] };
 
     // Multi-signal reachability guard — structural hallucination prevention.
     if let Some(secondary) = secondary_signal(query, entity, &db) {

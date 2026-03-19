@@ -49,11 +49,16 @@ def style(graph_fact: str, user_prompt: str) -> str:
 
     text = graph_fact.strip()
 
-    # Strip leading corpus-boundary tokens.  The graph walker anchors at ``
-    # or '' sentence-boundary nodes in the corpus; these appear verbatim at
-    # the start of the raw fact when the reverse-walk reaches a sentence head.
+    # Strip leading corpus-boundary tokens and trailing Wikipedia markers.
+    # The graph walker anchors at `` or '' sentence-boundary nodes; these
+    # appear verbatim when the walk reaches a sentence head or overshoots.
     while text and text[0] in "`'\"":
         text = text[1:].lstrip()
+    # Strip trailing '' / `` / ` artifacts that appear when the walk exits
+    # through a Wikipedia sentence-boundary node at the end.
+    for suffix in (" ''", " ``", " `", " '", ' "'):
+        if text.endswith(suffix):
+            text = text[: -len(suffix)].rstrip()
 
     # Capitalise first letter.
     if text:

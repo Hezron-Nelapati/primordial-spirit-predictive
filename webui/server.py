@@ -211,8 +211,9 @@ def _run_query(query: str, sid: str) -> dict:
             print(f"[FLASK] classify failed ({exc}) — using defaults.", flush=True)
     else:
         # Fallback: extract first content word
-        stopwords = {"what", "when", "where", "why", "how", "is", "are", "the", "a", "an",
-                     "and", "or", "do", "does", "can", "tell", "show", "give"}
+        stopwords = {"what", "when", "where", "why", "how", "who", "is", "are", "the", "a", "an",
+                     "and", "or", "do", "does", "can", "tell", "show", "give", "about", "me",
+                     "my", "you", "your", "its", "our", "they", "them", "their", "we", "he", "she"}
         for word in re.sub(r"[^a-z ]", " ", query.lower()).split():
             if word not in stopwords and len(word) > 2:
                 entity = word
