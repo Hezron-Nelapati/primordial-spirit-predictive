@@ -50,8 +50,8 @@ pub fn predict_next(
         Some(id) => id,
         None => {
             // Guardrail 1: OOV Lexical Fallback
-            println!("🚨 OOV Panic: '{}' not inside spatial memory.", current_word);
-            println!("⚡ Triggering 5-Dimensional Lexical Vector Fallback...");
+            eprintln!("🚨 OOV Panic: '{}' not inside spatial memory.", current_word);
+            eprintln!("⚡ Triggering 5-Dimensional Lexical Vector Fallback...");
             let target_vec = crate::graph::WordNode::compute_lexical_vector(current_word);
             let mut best_dist = f32::MAX;
             let mut best_id = 0u64;
@@ -65,7 +65,7 @@ pub fn predict_next(
                     nearest_str = node.surface.clone();
                 }
             }
-            println!("✅ Successfully snapped OOV onto geometric structural neighbor: [{}]", nearest_str);
+            eprintln!("✅ Successfully snapped OOV onto geometric structural neighbor: [{}]", nearest_str);
             best_id
         }
     };
@@ -79,7 +79,7 @@ pub fn predict_next(
     let edges = graph.edges_from(current_id);
 
     if !edges.is_empty() {
-        println!("    [TRACE] Validating {} outgoing pathways geometrically...", edges.len());
+        eprintln!("    [TRACE] Validating {} outgoing pathways geometrically...", edges.len());
         return match config.mode {
             WalkMode::Explain  => score_edges_explain(&edges, graph),
             WalkMode::Question => score_edges_question(&edges, graph, active_entity),
@@ -114,7 +114,7 @@ pub fn predict_next(
         }
 
         if !tier2_edges.is_empty() {
-            println!("    [TIER_2] No direct edges — centroid radial search found {} candidate edges from {} neighbours.",
+            eprintln!("    [TIER_2] No direct edges — centroid radial search found {} candidate edges from {} neighbours.",
                 tier2_edges.len(), neighbours.len());
             return score_edges(&tier2_edges, graph, active_intent, active_domain, active_tone, active_entity, config);
         }
@@ -135,7 +135,7 @@ pub fn predict_next(
     if config.mode == WalkMode::Question {
         if let Some(grid) = spatial {
             if let Some(bridge) = spatial_a_star_bridge(current_id, active_entity, graph, grid) {
-                println!("    [TIER_3] Question A* bridge → spatial midpoint jump to [{}].", bridge);
+                eprintln!("    [TIER_3] Question A* bridge → spatial midpoint jump to [{}].", bridge);
                 return Some(bridge);
             }
         }
@@ -155,7 +155,7 @@ pub fn predict_next(
     }
 
     if !tier3_edges.is_empty() {
-        println!("    [TIER_3] No Tier-2 candidates — backtrack-reroute found {} alternate path(s) from {} ancestor(s).",
+        eprintln!("    [TIER_3] No Tier-2 candidates — backtrack-reroute found {} alternate path(s) from {} ancestor(s).",
             tier3_edges.len(), ancestor_ids.len());
         return score_edges(&tier3_edges, graph, active_intent, active_domain, active_tone, active_entity, config);
     }
@@ -167,13 +167,16 @@ pub fn predict_next(
 /// Wider topological coverage produces richer explanatory sequences.
 /// Falls back to the first edge if all targets are leaves.
 fn score_edges_explain(edges: &[WordEdge], graph: &dyn GraphAccess) -> Option<String> {
+    // Cache outgoing edge counts to avoid a second SQL query for the winner.
     let best = edges.iter().max_by_key(|e| graph.edges_from(e.to).len());
-    best.and_then(|e| graph.node_by_id(e.to).map(|n| {
+    best.and_then(|e| {
         let out_degree = graph.edges_from(e.to).len();
-        println!("      [EXPLAIN_MODE] Selected node [{}] with {} onward edges (widest coverage).",
-            n.surface, out_degree);
-        n.surface
-    }))
+        graph.node_by_id(e.to).map(|n| {
+            eprintln!("      [EXPLAIN_MODE] Selected node [{}] with {} onward edges (widest coverage).",
+                n.surface, out_degree);
+            n.surface
+        })
+    })
 }
 
 /// Question mode: prefer the edge whose target node is closest (in outgoing hops)
@@ -198,7 +201,7 @@ fn score_edges_question(
     let best = edges.iter().min_by_key(|e| bfs_distance(e.to, target_id, graph, 5));
 
     best.and_then(|e| graph.node_by_id(e.to).map(|n| {
-        println!("      [QUESTION_MODE] Selected node [{}] as closest to entity anchor [{}].",
+        eprintln!("      [QUESTION_MODE] Selected node [{}] as closest to entity anchor [{}].",
             n.surface, active_entity);
         n.surface
     }))
@@ -235,28 +238,29 @@ fn score_edges(
     config: &WalkConfig,
 ) -> Option<String> {
     let mut best_edge   = None;
-    let mut highest_weight = 0.0_f32;
+    // Initialize to NEG_INFINITY so any edge — including weight=0 — can win.
+    let mut highest_weight = f32::NEG_INFINITY;
 
     for edge in edges {
         let mut adj_weight = edge.weight;
         let target_surface = graph.node_by_id(edge.to).map(|n| n.surface).unwrap_or_default();
-        println!("      └─ Scanning Edge toward: [{}]", target_surface);
+        eprintln!("      └─ Scanning Edge toward: [{}]", target_surface);
 
         if edge.intent == active_intent {
             adj_weight *= 2.0;
-            println!("         ↳ Intent Match '{}': Weight * 2.0 (New: {:.2})", active_intent, adj_weight);
+            eprintln!("         ↳ Intent Match '{}': Weight * 2.0 (New: {:.2})", active_intent, adj_weight);
         }
         if edge.domain == active_domain {
             adj_weight *= 2.0;
-            println!("         ↳ Domain Match '{}': Weight * 2.0 (New: {:.2})", active_domain, adj_weight);
+            eprintln!("         ↳ Domain Match '{}': Weight * 2.0 (New: {:.2})", active_domain, adj_weight);
         }
         if !active_tone.is_empty() && edge.tone == active_tone {
             adj_weight *= 2.0;
-            println!("         ↳ Tone Match '{}': Weight * 2.0 (New: {:.2})", active_tone, adj_weight);
+            eprintln!("         ↳ Tone Match '{}': Weight * 2.0 (New: {:.2})", active_tone, adj_weight);
         }
         if !active_entity.is_empty() && edge.entity.as_deref() == Some(active_entity) {
             adj_weight *= 1.5;
-            println!("         ↳ Entity Match '{}': Weight * 1.5 (New: {:.2})", active_entity, adj_weight);
+            eprintln!("         ↳ Entity Match '{}': Weight * 1.5 (New: {:.2})", active_entity, adj_weight);
         }
 
         // Guardrail 5: Axiomatic Hallucination (Temporal Tie-Breaking)
@@ -265,7 +269,7 @@ fn score_edges(
             let mut tm = 2.0 - (diff / 10.0);
             if tm < 1.0 { tm = 1.0; }
             adj_weight *= tm;
-            println!("         ↳ Temporal Proximity [Edge:{}, Target:{}]: Weight * {:.2} (New: {:.2})",
+            eprintln!("         ↳ Temporal Proximity [Edge:{}, Target:{}]: Weight * {:.2} (New: {:.2})",
                 edge_year, target_year, tm, adj_weight);
         }
 
@@ -336,14 +340,14 @@ pub fn resolve_start_node(
         None => return None,
     };
 
-    println!("  [SYS_ORCHESTRATOR]: Jumping onto Target Entity Node: [{}]", entity_word);
+    eprintln!("  [SYS_ORCHESTRATOR]: Jumping onto Target Entity Node: [{}]", entity_word);
 
     for _ in 0..20 {
         let incoming = graph.edges_to(current_id);
         if incoming.is_empty() { break; }
 
         let mut best_prev = None;
-        let mut highest_weight = 0.0_f32;
+        let mut highest_weight = f32::NEG_INFINITY;
         let active_domain = reasoning.session.domain_stack.last().map(String::as_str).unwrap_or("general");
 
         for edge in &incoming {

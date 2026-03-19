@@ -158,12 +158,14 @@ def _run_query(query: str, sid: str) -> dict:
             tone     = cls.get("tone",   "neutral")
             domain   = cls.get("domain", "general")
             entities = cls.get("entities", [])
-            # Pick entity: first NER entity, or extract from POS tags
+            # Pick entity: first NER entity (preserve original case — Rust graph
+            # stores tokens case-sensitively as tokenized from the corpus), or
+            # fall back to POS-filtered first noun from the query.
             if entities:
-                entity = entities[0].lower()
+                entity = entities[0]
             else:
-                entity = _classify._pos_filter(query, _classify.DOMAIN_TAGS).split()[0].lower() \
-                         if _classify._pos_filter(query, _classify.DOMAIN_TAGS).split() else "query"
+                pos_words = _classify._pos_filter(query, _classify.DOMAIN_TAGS).split()
+                entity = pos_words[0] if pos_words else "query"
         except Exception as exc:
             print(f"[FLASK] classify failed ({exc}) — using defaults.", flush=True)
     else:

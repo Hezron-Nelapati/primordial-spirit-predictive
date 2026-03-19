@@ -23,12 +23,13 @@ ROOT        = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 PYTHON_DIR  = os.path.join(ROOT, "python")
 DATA_DIR    = os.path.join(ROOT, "data")
 
-V2_CORPUS_TXT  = os.path.join(DATA_DIR, "corpus_v2.txt")
-V3_CORPUS_TXT  = os.path.join(DATA_DIR, "corpus_v3_massive.txt")
-V2_CORPUS_JSON = os.path.join(DATA_DIR, "v2_corpus.json")
-V3_CORPUS_JSON = os.path.join(DATA_DIR, "v3_corpus.json")
-CENTROIDS_JSON = os.path.join(DATA_DIR, "centroids.json")
-GRAPH_DB       = os.path.join(DATA_DIR, "graph.db")
+V2_CORPUS_TXT        = os.path.join(DATA_DIR, "corpus_v2.txt")
+V3_CORPUS_TXT        = os.path.join(DATA_DIR, "corpus_v3_massive.txt")
+V2_CORPUS_JSON       = os.path.join(DATA_DIR, "v2_corpus.json")
+V2_CORPUS_REINFORCED = os.path.join(DATA_DIR, "v2_corpus_reinforced.json")
+V3_CORPUS_JSON       = os.path.join(DATA_DIR, "v3_corpus.json")
+CENTROIDS_JSON       = os.path.join(DATA_DIR, "centroids.json")
+GRAPH_DB             = os.path.join(DATA_DIR, "graph.db")
 
 
 def log(tag: str, msg: str) -> None:
@@ -50,14 +51,19 @@ def run_script(script_name: str) -> int:
     return proc.returncode
 
 
-def reinforce_corpus(path: str, passes: int) -> None:
-    """Duplicate corpus entries `passes` times to reinforce edge weights."""
-    with open(path, encoding="utf-8") as f:
+def reinforce_corpus(src: str, dest: str, passes: int) -> None:
+    """Write reinforced corpus to `dest` (src × passes), leaving `src` untouched.
+    Writing to a separate file prevents compounding on re-runs: src is always the
+    freshly-ingested single-pass output from v2_ingest.py."""
+    with open(src, encoding="utf-8") as f:
         rows = json.load(f)
     if not isinstance(rows, list) or passes <= 1:
+        # No reinforcement needed — copy src verbatim so Rust always reads dest.
+        import shutil
+        shutil.copy2(src, dest)
         return
     reinforced = rows * passes
-    with open(path, "w", encoding="utf-8") as f:
+    with open(dest, "w", encoding="utf-8") as f:
         json.dump(reinforced, f)
     log("PROGRESS", f"  {len(rows)} entries × {passes} passes = {len(reinforced)} total")
 
@@ -110,12 +116,14 @@ def main() -> None:
 
     # ── Step 3: Edge reinforcement ────────────────────────────────────────────
     log("STEP", f"Reinforcing graph edges ({passes}× passes)")
-    log("PROGRESS", "  Duplicating corpus entries to multiply edge weights …")
+    log("PROGRESS", "  Writing reinforced corpus to v2_corpus_reinforced.json (source unchanged) …")
     try:
-        reinforce_corpus(V2_CORPUS_JSON, passes)
-        log("DONE", f"Edge reinforcement complete ({passes}× applied to V2 corpus)")
+        reinforce_corpus(V2_CORPUS_JSON, V2_CORPUS_REINFORCED, passes)
+        log("DONE", f"Edge reinforcement complete ({passes}× → {V2_CORPUS_REINFORCED})")
     except Exception as exc:
-        log("WARN", f"Edge reinforcement failed ({exc}) — using single-pass corpus")
+        log("WARN", f"Edge reinforcement failed ({exc}) — copying source corpus as fallback")
+        import shutil
+        shutil.copy2(V2_CORPUS_JSON, V2_CORPUS_REINFORCED)
 
     # ── Step 4: V3 ingest (optional) ─────────────────────────────────────────
     if v3_present:

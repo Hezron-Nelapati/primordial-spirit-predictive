@@ -1,10 +1,11 @@
 use spse_predictive::db::GraphDb;
 use spse_predictive::graph::GraphAccess;
 use spse_predictive::ingest::{ingest_v2_to_db, V2JsonData};
-use spse_predictive::reasoning::ReasoningModule;
+use spse_predictive::reasoning::{ReasoningModule, SessionalMemory};
 use spse_predictive::spatial::SpatialGrid;
 use spse_predictive::reasoning::{evaluate_arithmetic, extract_year_from_query, is_arithmetic_query};
 use spse_predictive::walk::{compute_depth_limit, is_reachable, predict_next, secondary_signal, WalkConfig, WalkMode};
+use std::collections::{HashMap, VecDeque};
 use std::fs;
 use std::io::{self, BufRead, Write};
 use std::process::Command;
@@ -92,16 +93,19 @@ fn generate_dynamic_answer(
     let mut current = start_node;
     let mut sentence_count = 0;
     // Rolling position window (last 5 visited nodes) for Tier 2 centroid search.
+    // VecDeque gives O(1) front-removal vs Vec's O(N) shift.
     const POS_WINDOW: usize = 5;
-    let mut pos_history: Vec<[f32; 3]> = Vec::with_capacity(POS_WINDOW);
+    let mut pos_history: VecDeque<[f32; 3]> = VecDeque::with_capacity(POS_WINDOW + 1);
 
     for _ in 0..50 {
-        if let Some(next_word) = predict_next(&current, graph, spatial, reasoning, config, &pos_history) {
+        // predict_next expects a slice; convert deque to a temporary vec for the call.
+        let pos_slice: Vec<[f32; 3]> = pos_history.iter().copied().collect();
+        if let Some(next_word) = predict_next(&current, graph, spatial, reasoning, config, &pos_slice) {
             // Record position of current node before advancing.
             if let Some(id) = graph.surface_to_id(&current) {
                 if let Some(node) = graph.node_by_id(id) {
-                    pos_history.push(node.position);
-                    if pos_history.len() > POS_WINDOW { pos_history.remove(0); }
+                    if pos_history.len() >= POS_WINDOW { pos_history.pop_front(); }
+                    pos_history.push_back(node.position);
                 }
             }
             if next_word == "." || next_word == "?" || next_word == "!" {
@@ -146,18 +150,25 @@ struct ServerResponse {
 }
 
 /// Handle a single classified request in server mode.
-/// Classification (intent/tone/domain/entities) has already been done by Flask.
-fn handle_server_request(req: &ServerRequest, db: &GraphDb, spatial: &SpatialGrid) -> String {
+/// Accepts the caller's session state and returns the updated session so
+/// `run_server_mode` can persist it across requests for the same session_id.
+fn handle_server_request(
+    req: &ServerRequest,
+    db: &GraphDb,
+    spatial: &SpatialGrid,
+    session: SessionalMemory,
+) -> (String, SessionalMemory) {
     eprintln!(
         "\n[SERVER_REQUEST]: \"{}\"  entity='{}' domain='{}' intent='{}' tone='{}'",
         req.query, req.entity, req.domain, req.intent, req.tone
     );
 
-    // Arithmetic interception — bypass graph walk entirely.
+    // Arithmetic interception — bypass graph walk; session unchanged.
     if is_arithmetic_query(&req.query) {
         eprintln!("  [GUARDRAIL_6]: Arithmetic query — computing natively.");
-        return evaluate_arithmetic(&req.query)
+        let answer = evaluate_arithmetic(&req.query)
             .unwrap_or_else(|| "I couldn't parse that arithmetic expression.".to_string());
+        return (answer, session);
     }
 
     let depth = compute_depth_limit(&req.entity, db);
@@ -166,7 +177,8 @@ fn handle_server_request(req: &ServerRequest, db: &GraphDb, spatial: &SpatialGri
     let mut all_entities: Vec<String> = vec![req.entity.clone()];
     all_entities.extend(req.entities.clone());
 
-    let mut reasoning = ReasoningModule::new(db);
+    // Restore the caller's session so multi-turn context accumulates correctly.
+    let mut reasoning = ReasoningModule::with_session(db, session);
     reasoning.update_context(&req.intent, &req.tone, &req.domain, &all_entities);
     let config = WalkConfig {
         target_year: req.year,
@@ -181,14 +193,18 @@ fn handle_server_request(req: &ServerRequest, db: &GraphDb, spatial: &SpatialGri
             secondary
         );
         if !is_reachable(&req.entity, &secondary, db, 10) {
-            return format!(
+            let answer = format!(
                 "System Fault: [{}] is not topologically reachable from [{}]. Structural Abort.",
                 secondary, req.entity
             );
+            let updated_session = reasoning.session;
+            return (answer, updated_session);
         }
     }
 
-    generate_dynamic_answer(&req.query, &req.entity, db, Some(spatial), &mut reasoning, &config)
+    let answer = generate_dynamic_answer(&req.query, &req.entity, db, Some(spatial), &mut reasoning, &config);
+    let updated_session = reasoning.session;
+    (answer, updated_session)
 }
 
 /// Run the persistent server loop: signal READY, then process one JSON request
@@ -203,6 +219,10 @@ fn run_server_mode(db: GraphDb, spatial: SpatialGrid) -> ! {
         out.flush().unwrap();
     }
 
+    // Session map: persists ReasoningModule session state across requests.
+    // Key = session_id string; value = the accumulated SessionalMemory.
+    let mut sessions: HashMap<String, SessionalMemory> = HashMap::new();
+
     let stdin = io::stdin();
     for line in stdin.lock().lines() {
         let line = match line {
@@ -216,8 +236,10 @@ fn run_server_mode(db: GraphDb, spatial: SpatialGrid) -> ! {
 
         let resp = match serde_json::from_str::<ServerRequest>(&line) {
             Ok(req) => {
-                let answer = handle_server_request(&req, &db, &spatial);
-                let error  = answer.starts_with("System Fault");
+                let prior_session = sessions.remove(&req.session_id).unwrap_or_else(SessionalMemory::new);
+                let (answer, updated_session) = handle_server_request(&req, &db, &spatial, prior_session);
+                sessions.insert(req.session_id.clone(), updated_session);
+                let error = answer.starts_with("System Fault");
                 ServerResponse { answer, error }
             }
             Err(e) => ServerResponse {
@@ -297,10 +319,20 @@ fn main() {
     // Skip when the DB already has nodes (a previous run built it).
     if db.node_count() == 0 {
         eprintln!("[GRAPH] Empty DB — running first-run ingest...");
-        let v2_data = match fs::read_to_string("data/v2_corpus.json") {
+        // Prefer the reinforced corpus (written by train_pipeline.py) to get
+        // edge weights that reflect the configured number of passes.  Fall back
+        // to the single-pass v2_corpus.json when training hasn't been run yet.
+        let v2_path = if fs::metadata("data/v2_corpus_reinforced.json").is_ok() {
+            eprintln!("[GRAPH] Using reinforced corpus: data/v2_corpus_reinforced.json");
+            "data/v2_corpus_reinforced.json"
+        } else {
+            eprintln!("[GRAPH] Using single-pass corpus: data/v2_corpus.json");
+            "data/v2_corpus.json"
+        };
+        let v2_data = match fs::read_to_string(v2_path) {
             Ok(d) => d,
             Err(e) => {
-                eprintln!("[FATAL] data/v2_corpus.json missing or unreadable: {}", e);
+                eprintln!("[FATAL] {} missing or unreadable: {}", v2_path, e);
                 eprintln!("[FATAL] Run `cd python && python3 v2_ingest.py` first.");
                 std::process::exit(1);
             }

@@ -131,7 +131,8 @@ impl GraphDb {
     }
 
     fn row_to_edge(row: &rusqlite::Row<'_>) -> rusqlite::Result<WordEdge> {
-        let dated_i64: i64 = row.get(8)?;
+        // Columns: from_id(0), to_id(1), weight(2), intent(3), tone(4), domain(5), entity(6), dated(7)
+        let dated_i64: i64 = row.get(7)?;
         Ok(WordEdge {
             from:   row.get::<_, i64>(0)? as NodeId,
             to:     row.get::<_, i64>(1)? as NodeId,

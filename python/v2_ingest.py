@@ -41,10 +41,24 @@ def _nearest_blended(emb_full, emb_pos, full_centroids, pos_centroids, labels):
 def centroid_classify(text, model, store):
     """Classify intent, tone, and domain using the centroid model.
     Mirrors classify_query.py logic exactly for symmetric training/runtime tags.
+    Batch-encodes all texts in a single model.encode() call to avoid per-sentence overhead.
     """
-    emb_full       = model.encode(text).tolist()
-    emb_intent_pos = model.encode(_pos_filter(text, _INTENT_TAGS)).tolist()
-    emb_tone_pos   = model.encode(_pos_filter(text, _TONE_TAGS)).tolist()
+    intent_text = _pos_filter(text, _INTENT_TAGS)
+    tone_text   = _pos_filter(text, _TONE_TAGS)
+
+    if "domain_labels" in store:
+        domain_text = _pos_filter(text, _DOMAIN_TAGS)
+        batch = [text, intent_text, tone_text, domain_text]
+        embs  = model.encode(batch)
+        emb_full, emb_intent_pos, emb_tone_pos, emb_domain_pos = (e.tolist() for e in embs)
+        domain = _nearest_blended(emb_full, emb_domain_pos,
+                                  store["domain_full_centroids"], store["domain_pos_centroids"],
+                                  store["domain_labels"])
+    else:
+        batch = [text, intent_text, tone_text]
+        embs  = model.encode(batch)
+        emb_full, emb_intent_pos, emb_tone_pos = (e.tolist() for e in embs)
+        domain = mock_classify(text)[2]  # keyword fallback for old centroids.json
 
     intent = _nearest_blended(emb_full, emb_intent_pos,
                                store["intent_full_centroids"], store["intent_pos_centroids"],
@@ -52,14 +66,6 @@ def centroid_classify(text, model, store):
     tone   = _nearest_blended(emb_full, emb_tone_pos,
                                store["tone_full_centroids"], store["tone_pos_centroids"],
                                store["tone_labels"])
-
-    if "domain_labels" in store:
-        emb_domain_pos = model.encode(_pos_filter(text, _DOMAIN_TAGS)).tolist()
-        domain = _nearest_blended(emb_full, emb_domain_pos,
-                                  store["domain_full_centroids"], store["domain_pos_centroids"],
-                                  store["domain_labels"])
-    else:
-        domain = mock_classify(text)[2]  # keyword fallback for old centroids.json
 
     return intent, tone, domain
 
@@ -74,7 +80,8 @@ def extract_entities(text):
     return entities
 
 def extract_date(text):
-    match = re.search(r'\b(19|20)\d{2}\b', text)
+    # Range 1000–2099 — matches v3_ingest.py and reasoning.rs for consistency.
+    match = re.search(r'\b(10|11|12|13|14|15|16|17|18|19|20)\d{2}\b', text)
     if match:
         return int(match.group(0))
     return None

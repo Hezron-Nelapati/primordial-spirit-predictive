@@ -198,6 +198,11 @@ impl<'a> ReasoningModule<'a> {
         }
     }
 
+    /// Initialise with an existing session (for multi-turn server mode).
+    pub fn with_session(graph: &'a dyn GraphAccess, session: SessionalMemory) -> Self {
+        Self { graph, session }
+    }
+
     /// Guardrail 3: Pre-Execution Sanitization Pass
     /// Loops backward. If a terminating "command" intent is found, preceding queries (like "support" or "question") are dropped.
     pub fn sanitize_queue(intents: Vec<String>) -> Vec<String> {
