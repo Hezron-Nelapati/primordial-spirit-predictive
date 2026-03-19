@@ -61,16 +61,27 @@ def style(graph_fact: str, user_prompt: str) -> str:
         ]
         tokenizer = pipe.tokenizer
         prompt    = tokenizer.apply_chat_template(messages, tokenize=False, add_generation_prompt=True)
-        # Fix #14: decode only the newly generated tokens rather than splitting on
-        # a hard-coded chat-template marker that may change with model updates.
         prompt_ids = tokenizer(prompt, return_tensors="pt")["input_ids"]
         prompt_len = prompt_ids.shape[-1]
-        # Fix #15: remove temperature=0.0 — it is ignored when do_sample=False and
-        # only creates confusion for future readers.
-        outputs = pipe(prompt, max_new_tokens=40, do_sample=False)
+        outputs = pipe(
+            prompt,
+            max_new_tokens=80,
+            do_sample=False,
+            # repetition_penalty > 1.0 discounts already-generated tokens from
+            # the logit distribution so the model cannot get stuck looping the
+            # same phrase (e.g. "User: the school at" repeating indefinitely).
+            repetition_penalty=1.3,
+        )
         full_ids = tokenizer(outputs[0]["generated_text"], return_tensors="pt")["input_ids"]
         new_ids  = full_ids[0, prompt_len:]
-        return tokenizer.decode(new_ids, skip_special_tokens=True).strip()
+        text = tokenizer.decode(new_ids, skip_special_tokens=True).strip()
+        # Strip chat-template bleed: SmolLM2 occasionally generates "User:" or
+        # "user:" at the end of its response when it predicts a new chat turn.
+        for marker in ("User:", "user:", "USER:", "Human:", "<|im_start|>"):
+            idx = text.find(marker)
+            if idx != -1:
+                text = text[:idx].strip()
+        return text
     except Exception as exc:
         print(f"  [miniLLM_WRAPPER]: style() failed ({exc}) — returning raw fact.", file=sys.stderr)
         return graph_fact

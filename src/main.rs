@@ -204,12 +204,22 @@ fn handle_server_request(
     };
 
     // Multi-signal reachability guard — structural hallucination prevention.
+    // Only fires when the primary entity IS in the graph and the secondary
+    // signal is genuinely unreachable from it.  When the entity is OOV
+    // (not in graph), the spatial fallback handles routing — aborting here
+    // would block every proper-noun / multi-word query whose surface form
+    // isn't verbatim in the graph.
     if let Some(secondary) = secondary_signal(&req.query, &req.entity, db) {
         eprintln!(
             "  [SYS_ORCHESTRATOR]: Secondary signal -> '{}'. BFS reachability check...",
             secondary
         );
-        if !is_reachable(&req.entity, &secondary, db, 10) {
+        let entity_in_graph = db.surface_to_id(&req.entity).is_some()
+            || db.surface_to_id(&req.entity.to_lowercase()).is_some();
+        let reachable = !entity_in_graph
+            || is_reachable(&req.entity, &secondary, db, 10)
+            || is_reachable(&req.entity.to_lowercase(), &secondary, db, 10);
+        if !reachable {
             let answer = format!(
                 "System Fault: [{}] is not topologically reachable from [{}]. Structural Abort.",
                 secondary, req.entity
