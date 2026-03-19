@@ -38,26 +38,40 @@ def _nearest_blended(emb_full, emb_pos, full_centroids, pos_centroids, labels):
     return labels[best_idx]
 
 
-def batch_classify(sentences, model, store):
-    """Batch-encode all sentences at once, then classify each.
-    Batch encoding is orders of magnitude faster than per-sentence calls —
-    one matmul across N sentences vs N separate forward passes.
-    Returns a list of (intent, tone, domain) tuples.
-    """
-    embs_full = model.encode(sentences, batch_size=64, show_progress_bar=False)
+def corpus_batch_classify(all_sentences, model, store, batch_size=256):
+    """Encode the entire corpus in one pass.
 
-    intent_texts = [_pos_filter(s, _INTENT_TAGS) for s in sentences]
-    tone_texts   = [_pos_filter(s, _TONE_TAGS)   for s in sentences]
-    embs_intent  = model.encode(intent_texts, batch_size=64, show_progress_bar=False)
-    embs_tone    = model.encode(tone_texts,   batch_size=64, show_progress_bar=False)
+    Collects every sentence up-front then calls model.encode() once per
+    text-variant (full / intent-pos / tone-pos / domain-pos) with a large
+    batch_size.  This gives the GPU/MPS a single large matrix multiply instead
+    of thousands of tiny ones — typically 10-50× faster than per-paragraph
+    batching.
+
+    Returns a list of (intent, tone, domain) tuples, one per sentence.
+    """
+    n = len(all_sentences)
+    if n == 0:
+        return []
+
+    print(f"  [INGEST]: Encoding {n:,} sentences (full text) …", flush=True)
+    embs_full = model.encode(all_sentences, batch_size=batch_size, show_progress_bar=True)
+
+    print(f"  [INGEST]: Encoding intent-POS filtered texts …", flush=True)
+    intent_texts = [_pos_filter(s, _INTENT_TAGS) for s in all_sentences]
+    embs_intent  = model.encode(intent_texts, batch_size=batch_size, show_progress_bar=True)
+
+    print(f"  [INGEST]: Encoding tone-POS filtered texts …", flush=True)
+    tone_texts = [_pos_filter(s, _TONE_TAGS) for s in all_sentences]
+    embs_tone  = model.encode(tone_texts, batch_size=batch_size, show_progress_bar=True)
 
     has_domain = "domain_labels" in store
     if has_domain:
-        domain_texts = [_pos_filter(s, _DOMAIN_TAGS) for s in sentences]
-        embs_domain  = model.encode(domain_texts, batch_size=64, show_progress_bar=False)
+        print(f"  [INGEST]: Encoding domain-POS filtered texts …", flush=True)
+        domain_texts = [_pos_filter(s, _DOMAIN_TAGS) for s in all_sentences]
+        embs_domain  = model.encode(domain_texts, batch_size=batch_size, show_progress_bar=True)
 
     results = []
-    for i in range(len(sentences)):
+    for i in range(n):
         intent = _nearest_blended(embs_full[i].tolist(), embs_intent[i].tolist(),
                                   store["intent_full_centroids"], store["intent_pos_centroids"],
                                   store["intent_labels"])
@@ -69,8 +83,9 @@ def batch_classify(sentences, model, store):
                                       store["domain_full_centroids"], store["domain_pos_centroids"],
                                       store["domain_labels"])
         else:
-            domain = mock_classify(sentences[i])[2]
+            domain = mock_classify(all_sentences[i])[2]
         results.append((intent, tone, domain))
+
     return results
 
 
@@ -115,8 +130,6 @@ def mock_classify(text):
 
 
 def main():
-    # Load centroid model once for the full corpus — batch encoding reuses the
-    # same loaded weights across all 98k+ sentences instead of reloading per call.
     clf_model = None
     clf_store = None
     try:
@@ -132,47 +145,48 @@ def main():
     with open('../data/corpus.txt', 'r', encoding='utf-8') as f:
         paragraphs = f.read().split('\n')
 
-    processed_data = []
-    total_paragraphs = len([p for p in paragraphs if p.strip()])
-    print(f"  [INGEST]: Processing {total_paragraphs} paragraphs …", flush=True)
-
-    for i, para in enumerate(paragraphs):
+    # ── Pass 1: tokenize entire corpus into sentences (CPU, NLTK) ────────────
+    # Collect all sentences first so we can encode the whole corpus in one shot.
+    print(f"  [INGEST]: Tokenizing {len(paragraphs):,} lines into sentences …", flush=True)
+    para_sentences = []   # list of (para_idx, [sentence, ...])
+    all_sentences  = []   # flat list — fed to corpus_batch_classify
+    for para in paragraphs:
         if not para.strip():
             continue
+        sents = nltk.sent_tokenize(para)
+        if sents:
+            para_sentences.append(sents)
+            all_sentences.extend(sents)
 
-        sentences = nltk.sent_tokenize(para)
-        if not sentences:
-            continue
+    print(f"  [INGEST]: {len(all_sentences):,} sentences across {len(para_sentences):,} paragraphs", flush=True)
 
-        # Batch-classify all sentences in this paragraph at once.
-        # One model.encode() call per paragraph instead of one per sentence.
-        if clf_model is not None and clf_store is not None:
-            classifications = batch_classify(sentences, clf_model, clf_store)
-        else:
-            classifications = [mock_classify(s) for s in sentences]
+    # ── Pass 2: encode & classify the full corpus in one batch ───────────────
+    if clf_model is not None and clf_store is not None:
+        classifications = corpus_batch_classify(all_sentences, clf_model, clf_store)
+    else:
+        classifications = [mock_classify(s) for s in all_sentences]
 
-        for seq, (sent, (intent, tone, domain)) in enumerate(zip(sentences, classifications)):
-            tokens   = nltk.word_tokenize(sent)
-            entities = extract_entities(sent)
-            dated    = extract_date(sent)
-
+    # ── Pass 3: NLTK entity/date extraction + assemble output ────────────────
+    print(f"  [INGEST]: Extracting entities and dates …", flush=True)
+    processed_data = []
+    cls_iter = iter(classifications)
+    for sents in para_sentences:
+        for seq, sent in enumerate(sents):
+            intent, tone, domain = next(cls_iter)
             processed_data.append({
                 "sequence_id": seq,
                 "text": sent,
-                "tokens": tokens,
+                "tokens": nltk.word_tokenize(sent),
                 "intent": intent,
                 "tone": tone,
                 "domain": domain,
-                "entities": entities,
-                "dated": dated,
+                "entities": extract_entities(sent),
+                "dated": extract_date(sent),
             })
-
-        if i % 5000 == 0 and i > 0:
-            print(f"  [INGEST]: Parsed {i}/{total_paragraphs} paragraphs …", flush=True)
 
     with open('../data/corpus_tmp.json', 'w', encoding='utf-8') as f:
         json.dump(processed_data, f, indent=2)
-    print(f"Ingestion complete — {len(processed_data)} sentences exported to data/corpus_tmp.json", flush=True)
+    print(f"Ingestion complete — {len(processed_data):,} sentences exported to data/corpus_tmp.json", flush=True)
 
 
 if __name__ == "__main__":
