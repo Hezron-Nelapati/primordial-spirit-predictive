@@ -173,9 +173,15 @@ fn main() {
         // before classification; graph walk is bypassed for math queries entirely.
         if is_arithmetic_query(query) {
             println!("\n  [GUARDRAIL_6]: Arithmetic/logic query detected — computing natively.");
-            match evaluate_arithmetic(query) {
-                Some(answer) => println!("  -> [BOT_OUTPUT]: \"{}\"", answer),
-                None         => println!("  -> [BOT_OUTPUT]: \"I couldn't parse that arithmetic expression.\""),
+            let raw_answer = evaluate_arithmetic(query)
+                .unwrap_or_else(|| "I couldn't parse that arithmetic expression.".to_string());
+            println!("\n  [SYS_ORCHESTRATOR]: Piping arithmetic result to miniLLM stylistic wrapper...");
+            match llm_style(&raw_answer, query) {
+                Some(styled) => println!("  -> [BOT_OUTPUT]: \"{}\"", styled),
+                None => {
+                    println!("  [SYS_ORCHESTRATOR]: miniLLM unavailable — returning raw result.");
+                    println!("  -> [BOT_OUTPUT]: \"{}\"", raw_answer);
+                }
             }
             println!("\n=============================================\n");
             return;
