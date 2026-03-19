@@ -3,17 +3,15 @@ FROM rust:latest AS builder
 
 WORKDIR /build
 
-# Cache dependency compilation separately from source
+# Cache dependencies before copying source
 COPY Cargo.toml Cargo.lock* ./
-# Create a dummy lib/main so `cargo build` fetches + compiles deps
 RUN mkdir -p src && \
     echo "fn main() {}" > src/main.rs && \
     echo "pub fn dummy() {}" > src/lib.rs && \
     cargo build --release 2>/dev/null || true
 
-# Now copy real source and build
+# Build real source
 COPY src ./src
-# Touch to force Rust to recompile (dummy files above changed timestamps)
 RUN touch src/main.rs src/lib.rs && cargo build --release
 
 # ─── Stage 2: Python runtime ──────────────────────────────────────────────────
@@ -21,35 +19,44 @@ FROM python:3.11-slim
 
 WORKDIR /app
 
-# System deps needed by some Python wheels (e.g. scikit-learn, numpy)
+# System libraries needed by scikit-learn / numpy
 RUN apt-get update && apt-get install -y --no-install-recommends \
         gcc g++ libgomp1 \
     && rm -rf /var/lib/apt/lists/*
 
-# Copy compiled Rust binary from builder stage
+# Copy compiled Rust binary
 COPY --from=builder /build/target/release/spse_predictive ./spse_predictive
 
 # Python dependencies
 COPY python/requirements.txt ./python/requirements.txt
 RUN pip install --no-cache-dir -r python/requirements.txt
 
-# Download spaCy model (fixes `python spacy download` — correct method is the module flag)
+# Download spaCy model (correct method: python3 -m spacy download)
 RUN python3 -m spacy download en_core_web_sm
 
-# Copy Python scripts and web UI
-COPY python/ ./python/
-COPY webui/  ./webui/
+# Download NLTK data required by classify_query.py, v2_ingest.py, server.py
+RUN python3 -c "\
+import nltk; \
+nltk.download('punkt_tab',                    quiet=True); \
+nltk.download('averaged_perceptron_tagger_eng', quiet=True); \
+nltk.download('maxent_ne_chunker_tab',        quiet=True); \
+nltk.download('words',                        quiet=True); \
+nltk.download('punkt',                        quiet=True); \
+"
 
-# Data directory — graph.db and corpus files are volume-mounted at runtime
-# so we only create the directory here as a mount point.
+# Python pipeline scripts and web UI
+COPY python/ ./python/
+COPY webui/   ./webui/
+
+# data/ is volume-mounted at runtime (corpus files + graph.db + centroids.json)
+# We create the directory here so the mount point exists
 RUN mkdir -p data
 
-# Expose Flask port
-EXPOSE 5000
-
-# Entrypoint triggers first-run DB ingest (warm-up query), then starts Flask
+# Entrypoint
 COPY docker-entrypoint.sh ./docker-entrypoint.sh
 RUN chmod +x docker-entrypoint.sh
+
+EXPOSE 5000
 
 ENV SPSE_BINARY=/app/spse_predictive
 ENV PORT=5000

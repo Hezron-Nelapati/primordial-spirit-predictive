@@ -10,10 +10,9 @@ use std::process::Command;
 
 /// Classify `query` using the trained centroid model via `python/classify_query.py`.
 /// Returns `(intent, tone, domain, entities)` or `None` if Python / the model is unavailable.
-fn classify_query(query: &str) -> Option<(String, String, String, Vec<String>)> {
-    let session_id = std::process::id().to_string();
+fn classify_query(query: &str, session_id: &str) -> Option<(String, String, String, Vec<String>)> {
     let output = Command::new("python3")
-        .args(["python/classify_query.py", query, "--session-id", &session_id])
+        .args(["python/classify_query.py", query, "--session-id", session_id])
         .output()
         .ok()?;
 
@@ -129,11 +128,36 @@ fn generate_dynamic_answer(
 fn main() {
     let args: Vec<String> = std::env::args().collect();
 
-    if args.len() < 4 {
-        eprintln!("Usage: cargo run -- \"<query>\" <entity> <domain> [year]");
+    // Count only positional args (ignore --flag pairs)
+    let positional_count = {
+        let mut count = 0usize;
+        let mut skip_next = false;
+        for a in args.iter().skip(1) {
+            if skip_next { skip_next = false; continue; }
+            if a.starts_with("--") { skip_next = true; } else { count += 1; }
+        }
+        count
+    };
+
+    if positional_count < 3 {
+        eprintln!("Usage: cargo run -- \"<query>\" <entity> <domain> [year] [--session-id ID]");
         eprintln!("Example: cargo run -- \"Is the server online?\" server tech 2026");
         std::process::exit(1);
     }
+
+    // Extract optional --session-id flag (can appear anywhere after positional args)
+    let session_id: String = {
+        let mut sid = std::process::id().to_string();
+        let mut i = 1usize;
+        while i < args.len() {
+            if args[i] == "--session-id" && i + 1 < args.len() {
+                sid = args[i + 1].clone();
+                break;
+            }
+            i += 1;
+        }
+        sid
+    };
 
     // -----------------------------------------------------------------------
     // Database connection
@@ -216,7 +240,9 @@ fn main() {
     let query  = &args[1];
     let entity = &args[2];
     let domain = &args[3];
-    let year: Option<u16> = args.get(4).and_then(|y| y.parse().ok())
+    let year: Option<u16> = args.get(4)
+        .filter(|a| !a.starts_with("--"))
+        .and_then(|y| y.parse().ok())
         .or_else(|| extract_year_from_query(query));
 
     println!("\n=========== 💬 CLI QUERY MODE 💬 ===========");
@@ -243,7 +269,7 @@ fn main() {
 
     // Live ML classification; fall back to CLI-supplied domain on failure.
     println!("\n  [CLASSIFIER]: Running centroid-based intent/tone/domain classification...");
-    let (intent, tone, effective_domain, ner_entities) = match classify_query(query) {
+    let (intent, tone, effective_domain, ner_entities) = match classify_query(query, &session_id) {
         Some((i, t, d, e)) => {
             println!("  [CLASSIFIER]: intent='{}' tone='{}' domain='{}' entities={:?}", i, t, d, e);
             (i, t, d, e)

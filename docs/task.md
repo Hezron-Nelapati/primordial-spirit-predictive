@@ -166,7 +166,7 @@ Status: **Accurate — matches all packages imported by checked-in scripts**.
 |---|---|---|---|
 | `data/corpus.txt` | ✓ | Manual | Legacy only |
 | `data/corpus_v2.txt` | ✓ | Manual | `v2_ingest.py` |
-| `data/v2_graph_edges.json` | ✓ | `v2_ingest.py` | `src/main.rs` (required) |
+| `data/v2_corpus.json` | ✓ | `v2_ingest.py` | `src/main.rs` (required) |
 | `data/centroids.json` | ✓ | `train_centroids.py` | `classify_query.py` |
 | `data/corpus_v3_massive.txt` | ✗ | `download_corpus.py` | `v3_ingest.py` |
 | `data/v3_graph_edges.json` | ✗ | `v3_ingest.py` | `src/main.rs` (auto-detected) |
@@ -179,7 +179,7 @@ Status: **Accurate — matches all packages imported by checked-in scripts**.
 |---|---|---|
 | `serde + serde_json` | ✓ | ✓ — JSON deserialization + subprocess output parsing |
 | `kiddo = "4"` | ✓ | ✓ — `SpatialGrid` wraps `kiddo::KdTree`; used in Tier 2 routing |
-| `rusqlite` | ✗ removed | Was unused; removed |
+| `rusqlite` | ✓ | ✓ — `graph.db` persistence; used by Rust runtime |
 | `rand` | ✗ removed | Was unused; removed |
 
 ---
@@ -346,6 +346,38 @@ The `implementation_plan.md` specifies a Sentence Queue to prevent embedding qua
 - [x] Rust passes `--session-id <PID>` to `classify_query.py` subprocess (`std::process::id()`)
 - [x] Single-turn (no `--session-id`) continues to work unchanged — queue is fully opt-in
 
+### Phase 17: Chat Web UI + Automated Training Pipeline
+Status: **In Progress**
+
+Replaces the entity/domain/year form with a real chat interface and adds a one-click training pipeline.
+
+#### Web UI (`webui/`)
+- [ ] `webui/server.py` — `/query` accepts `{"query":"..."}` only; auto-extracts entity (NLTK POS) and domain (keyword match); passes `--session-id` browser-session cookie to Rust binary for multi-turn sentence queue continuity
+- [ ] `webui/templates/index.html` — Dark-theme chat interface (messages thread, no entity/domain/year fields); training drawer (slide-in panel) with step tracker + log
+- [ ] Flask session cookie generates stable `session_id` per browser; passed to Rust as `--session-id` arg for `sentence_queue.py` continuity
+
+#### Training Pipeline (`python/train_pipeline.py`)
+- [ ] Orchestrates: check corpus → download V3 Wikipedia → V2 ingest → edge reinforcement (N×) → V3 ingest → train centroids → reset graph.db
+- [ ] `--passes N` argument (min 10, can only increase) multiplies v2_corpus.json entries N× so edge weights reinforce proportionally
+- [ ] Tagged output lines: `[STEP]`, `[PROGRESS]`, `[DONE]`, `[WARN]`, `[ERROR]` for SSE parsing
+- [ ] Deletes graph.db at end so Rust rebuilds from reinforced corpus on next query
+
+#### Training Endpoints (Flask)
+- [ ] `POST /train/start` — starts pipeline in background thread; returns `{ok, passes}`
+- [ ] `GET /train/stream?offset=N` — SSE endpoint replays log from offset N, live-streams until `{done, error}`
+- [ ] `GET /train/status` — polling fallback returning `{running, done, error, log_lines}`
+
+#### Rust Changes (`src/main.rs`)
+- [ ] `--session-id <ID>` optional flag parsed from CLI args (can appear after positional args)
+- [ ] Passes parsed session_id to `classify_query.py` subprocess instead of `std::process::id()`
+- [ ] Year extraction filters out `--`-prefixed args from positional arg parsing
+
+#### Docker Changes
+- [ ] `docker-entrypoint.sh` simplified: just starts Flask (no warmup query); training via UI
+- [ ] `Dockerfile`: adds `python3 -m nltk.downloader punkt_tab averaged_perceptron_tagger_eng maxent_ne_chunker_tab words` step
+- [ ] Deployed at port 5001 (5000 conflicts with macOS AirPlay Receiver)
+- [ ] Volume mount `./data:/app/data` persists corpus JSON, centroids.json, graph.db
+
 ---
 
 ## Remaining Blockers
@@ -371,9 +403,11 @@ The `implementation_plan.md` specifies a Sentence Queue to prevent embedding qua
 
 ## Handoff Context
 
-- **Working path**: `python/v2_ingest.py` → `data/v2_graph_edges.json` → `cargo run`
-- **`cargo run`**: passes — 5 demo scenarios, zero warnings
+- **Working path**: `python/v2_ingest.py` → `data/v2_corpus.json` → `cargo run -- "query" entity domain [year]`
+- **`cargo run`**: CLI-only mode (no demo mode); requires query + entity + domain args
 - **`cargo run -- "query" entity domain [year]`**: passes — classifier and LLM bridge both degrade gracefully when Python packages absent
 - **`cargo test`**: 112/112 pass across all suites (85 walk + 18 ingest + 9 classify), zero warnings
+- **Web UI**: available at `http://localhost:5001` via Docker; dark-theme chat interface with training drawer
+- **`docker compose up --build`**: starts the full stack (Flask web UI + Rust binary); training pipeline accessible through UI
 - **V3/RAG**: Rust load path ready; Python scripts ready; only data generation step missing
 - **Full pipeline** (when packages installed): `classify_query.py` → intent/tone/domain → `walk.rs` Tier 1 → `minillm_wrapper.py` → styled response
