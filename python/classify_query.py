@@ -5,7 +5,7 @@ Usage:
     python3 classify_query.py "query text" [centroids_path]
 
 Outputs a single JSON line to stdout:
-    {"intent": "question", "tone": "neutral", "domain": "tech"}
+    {"intent": "question", "tone": "neutral", "domain": "tech", "entities": ["Paris"]}
 
 All diagnostic messages go to stderr so the Rust caller can parse stdout cleanly.
 """
@@ -22,9 +22,13 @@ os.environ.setdefault("TOKENIZERS_PARALLELISM", "false")
 import nltk
 from sentence_transformers import SentenceTransformer
 
+# ── NER entity types to extract (spaCy label set) ────────────────────────────
+NER_TYPES = {"PERSON", "ORG", "GPE", "PRODUCT"}
+
 # ── POS tag sets — must match train_centroids.py exactly ─────────────────────
 INTENT_TAGS = {"VB", "VBD", "VBG", "VBN", "VBP", "VBZ", "NN", "NNS", "NNP", "NNPS"}
 TONE_TAGS   = {"JJ", "JJR", "JJS", "RB", "RBR", "RBS", "UH"}
+DOMAIN_TAGS = {"NN", "NNS", "NNP", "NNPS"}
 
 # ── domain keyword map — mirrors v2_ingest.py mock_classify() ─────────────────
 DOMAIN_KEYWORDS = {
@@ -79,7 +83,25 @@ def _keyword_domain(text: str) -> str:
     return "general"
 
 
-def classify(query: str, centroids_path: str = "data/centroids.json") -> dict:
+def _ner_entities(text: str) -> list:
+    """Extract named entity surface strings from text using spaCy en_core_web_sm.
+    Returns an empty list if spaCy or its model is unavailable — callers must
+    treat [] as a valid (no-entity) response rather than an error.
+    """
+    try:
+        import spacy
+        nlp = spacy.load("en_core_web_sm")
+        doc = nlp(text)
+        entities = [ent.text for ent in doc.ents if ent.label_ in NER_TYPES]
+        print(f"  [classify_query]: NER extracted {entities}", file=sys.stderr)
+        return entities
+    except (ImportError, OSError) as exc:
+        print(f"  [classify_query]: spaCy NER unavailable ({exc}) — entities=[]", file=sys.stderr)
+        return []
+
+
+def classify(query: str, centroids_path: str = "data/centroids.json",
+             session_id: str | None = None) -> dict:
     _ensure_nltk()
 
     print("  [classify_query]: Loading sentence-transformer model...", file=sys.stderr)
@@ -89,7 +111,24 @@ def classify(query: str, centroids_path: str = "data/centroids.json") -> dict:
         store = json.load(f)
 
     # Full-text embedding
-    emb_full = model.encode(query).tolist()
+    raw_emb = model.encode(query)
+
+    # Sentence Queue: if a session_id is provided, push this embedding into the
+    # rolling window and use the blended context vector for classification.
+    # Single-turn calls (no session_id) use the raw embedding unchanged.
+    if session_id is not None:
+        try:
+            from sentence_queue import SentenceQueue
+            q = SentenceQueue(session_id=session_id)
+            q.push(raw_emb)
+            emb_full = q.blended()
+            q.save()
+            print(f"  [classify_query]: Sentence queue depth={len(q._embeddings)} → blended embedding used.", file=sys.stderr)
+        except Exception as exc:
+            print(f"  [classify_query]: Sentence queue unavailable ({exc}) — using raw embedding.", file=sys.stderr)
+            emb_full = raw_emb.tolist()
+    else:
+        emb_full = raw_emb.tolist()
 
     # POS-filtered embeddings (must match train_centroids.py filtering)
     intent_text = _pos_filter(query, INTENT_TAGS)
@@ -107,18 +146,50 @@ def classify(query: str, centroids_path: str = "data/centroids.json") -> dict:
         store["tone_full_centroids"], store["tone_pos_centroids"],
         store["tone_labels"],
     )
-    domain = _keyword_domain(query)
 
-    return {"intent": intent, "tone": tone, "domain": domain}
+    # Domain: use centroid model when available; fall back to keyword heuristic.
+    if "domain_labels" in store:
+        domain_text = _pos_filter(query, DOMAIN_TAGS)
+        emb_domain_pos = model.encode(domain_text).tolist()
+        domain = _nearest_blended(
+            emb_full, emb_domain_pos,
+            store["domain_full_centroids"], store["domain_pos_centroids"],
+            store["domain_labels"],
+        )
+        print(f"  [classify_query]: domain via centroid model -> '{domain}'", file=sys.stderr)
+    else:
+        domain = _keyword_domain(query)
+        print(f"  [classify_query]: domain via keyword fallback -> '{domain}'", file=sys.stderr)
+
+    entities = _ner_entities(query)
+
+    return {"intent": intent, "tone": tone, "domain": domain, "entities": entities}
 
 
 if __name__ == "__main__":
     if len(sys.argv) < 2:
-        print("Usage: python3 classify_query.py 'query text' [centroids_path]", file=sys.stderr)
+        print("Usage: python3 classify_query.py 'query text' [centroids_path] [--session-id ID]", file=sys.stderr)
         sys.exit(1)
 
     query_text     = sys.argv[1]
-    centroids_path = sys.argv[2] if len(sys.argv) >= 3 else "data/centroids.json"
+    centroids_path = "data/centroids.json"
+    session_id     = None
 
-    result = classify(query_text, centroids_path)
+    # Parse optional positional centroids_path and --session-id flag
+    remaining = sys.argv[2:]
+    positional_done = False
+    i = 0
+    while i < len(remaining):
+        arg = remaining[i]
+        if arg == "--session-id" and i + 1 < len(remaining):
+            session_id = remaining[i + 1]
+            i += 2
+        elif not positional_done and not arg.startswith("--"):
+            centroids_path = arg
+            positional_done = True
+            i += 1
+        else:
+            i += 1
+
+    result = classify(query_text, centroids_path, session_id=session_id)
     print(json.dumps(result))

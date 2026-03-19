@@ -87,3 +87,41 @@ fn test_classifier_is_deterministic() {
     assert_eq!(clf.intent(&emb, &emb), clf.intent(&emb, &emb));
     assert_eq!(clf.tone(&emb, &emb), clf.tone(&emb, &emb));
 }
+
+// ---------------------------------------------------------------------------
+// Domain classification (Phase 9)
+// ---------------------------------------------------------------------------
+
+/// domain() must return a non-empty string for any embedding.
+/// When domain centroids are absent (old centroids.json), falls back to "general".
+#[test]
+fn test_classifier_domain_returns_valid_label_for_zero_vector() {
+    let clf = Classifier::load("data/centroids.json");
+    let emb = vec![0.0_f32; EMB_DIM];
+    let label = clf.domain(&emb, &emb);
+    assert!(!label.is_empty(), "domain label must not be empty");
+}
+
+/// When domain centroids ARE present, the returned label must be one of the
+/// five domains defined in train_centroids.py Phase 9 training data.
+/// When they are absent, "general" is returned — also a valid member of the set.
+#[test]
+fn test_classifier_domain_label_set_contains_core_domains() {
+    let clf = Classifier::load("data/centroids.json");
+    let emb = vec![0.0_f32; EMB_DIM];
+    let label = clf.domain(&emb, &emb);
+    let known = ["tech", "finance", "science", "geography", "general"];
+    assert!(
+        known.contains(&label),
+        "unexpected domain label '{}'; expected one of {:?}",
+        label, known
+    );
+}
+
+/// domain() must be deterministic — same embedding always returns same label.
+#[test]
+fn test_classifier_domain_is_deterministic() {
+    let clf = Classifier::load("data/centroids.json");
+    let emb = vec![0.1_f32; EMB_DIM];
+    assert_eq!(clf.domain(&emb, &emb), clf.domain(&emb, &emb));
+}

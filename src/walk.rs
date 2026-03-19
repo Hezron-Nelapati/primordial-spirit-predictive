@@ -3,9 +3,35 @@ use crate::reasoning::ReasoningModule;
 use crate::spatial::SpatialGrid;
 use std::collections::{HashSet, VecDeque};
 
+/// Controls the traversal strategy used by `predict_next`.
+///
+/// | Mode | Behaviour | Best for |
+/// |---|---|---|
+/// | `Forward` | Score outgoing edges by intent/domain/tone/entity/temporal signals; pick highest weight | `statement`, `command` |
+/// | `Explain` | Among qualifying edges prefer the target with the most onward edges (widest coverage) | `explain` |
+/// | `Question` | Prefer edges that lead toward an already-known entity anchor (answer-oriented) | `question` |
+#[derive(Debug, Clone, PartialEq)]
+pub enum WalkMode {
+    Forward,
+    Explain,
+    Question,
+}
+
+impl WalkMode {
+    /// Derive the appropriate walk mode from an intent label.
+    pub fn from_intent(intent: &str) -> Self {
+        match intent {
+            "explain" => WalkMode::Explain,
+            "question" => WalkMode::Question,
+            _ => WalkMode::Forward,
+        }
+    }
+}
+
 pub struct WalkConfig {
     pub target_year: Option<u16>,
     pub depth_limit: usize,
+    pub mode: WalkMode,
 }
 
 pub fn predict_next<'a>(
@@ -49,7 +75,11 @@ pub fn predict_next<'a>(
 
     if !edges.is_empty() {
         println!("    [TRACE] Validating {} outgoing pathways geometrically...", edges.len());
-        return score_edges(&edges, graph, active_intent, active_domain, active_tone, active_entity, config);
+        return match config.mode {
+            WalkMode::Explain   => score_edges_explain(&edges, graph),
+            WalkMode::Question  => score_edges_question(&edges, graph, active_entity),
+            WalkMode::Forward   => score_edges(&edges, graph, active_intent, active_domain, active_tone, active_entity, config),
+        };
     }
 
     // Tier 2: KD-tree radial search when no direct edges exist.
@@ -88,6 +118,71 @@ pub fn predict_next<'a>(
     }
 
     None
+}
+
+/// Explain mode: prefer the target node with the most onward outgoing edges.
+/// Wider topological coverage produces richer explanatory sequences.
+/// Falls back to the first edge if all targets are leaves.
+fn score_edges_explain<'a>(edges: &[&WordEdge], graph: &'a WordGraph) -> Option<&'a str> {
+    let best = edges.iter().max_by_key(|e| {
+        graph.edges.iter().filter(|out| out.from == e.to).count()
+    });
+    best.and_then(|e| graph.nodes.get(&e.to).map(|n| {
+        let out_degree = graph.edges.iter().filter(|out| out.from == e.to).count();
+        println!("      [EXPLAIN_MODE] Selected node [{}] with {} onward edges (widest coverage).",
+            n.surface.as_str(), out_degree);
+        n.surface.as_str()
+    }))
+}
+
+/// Question mode: prefer the edge whose target node is closest (in outgoing hops)
+/// to the active entity anchor — routes toward a known answer rather than
+/// extending the current chain linearly.
+/// Falls back to the first edge when no entity is set or no path closes.
+fn score_edges_question<'a>(
+    edges: &[&WordEdge],
+    graph: &'a WordGraph,
+    active_entity: &str,
+) -> Option<&'a str> {
+    let target_id = match graph.by_surface.get(active_entity) {
+        Some(id) => *id,
+        None => {
+            // No known entity anchor — fall back to first candidate.
+            return edges.first().and_then(|e| graph.nodes.get(&e.to).map(|n| n.surface.as_str()));
+        }
+    };
+
+    // Pick the edge whose target has the shortest forward-hop distance to the entity.
+    // Distance is approximated by a bounded BFS (max 5 hops); unreachable = usize::MAX.
+    let best = edges.iter().min_by_key(|e| {
+        bfs_distance(e.to, target_id, graph, 5)
+    });
+
+    best.and_then(|e| graph.nodes.get(&e.to).map(|n| {
+        println!("      [QUESTION_MODE] Selected node [{}] as closest to entity anchor [{}].",
+            n.surface.as_str(), active_entity);
+        n.surface.as_str()
+    }))
+}
+
+/// BFS hop distance from `from_id` to `to_id`, bounded at `max_hops`.
+/// Returns `usize::MAX` if unreachable within the bound.
+fn bfs_distance(from_id: u64, to_id: u64, graph: &WordGraph, max_hops: usize) -> usize {
+    if from_id == to_id { return 0; }
+    let mut visited: HashSet<u64> = HashSet::new();
+    let mut queue: VecDeque<(u64, usize)> = VecDeque::new();
+    queue.push_back((from_id, 0));
+    visited.insert(from_id);
+    while let Some((node, hops)) = queue.pop_front() {
+        if hops >= max_hops { continue; }
+        for edge in graph.edges.iter().filter(|e| e.from == node) {
+            if edge.to == to_id { return hops + 1; }
+            if visited.insert(edge.to) {
+                queue.push_back((edge.to, hops + 1));
+            }
+        }
+    }
+    usize::MAX
 }
 
 /// Score a candidate edge slice and return the surface of the highest-weighted target node.

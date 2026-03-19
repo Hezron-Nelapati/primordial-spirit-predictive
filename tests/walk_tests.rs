@@ -1,7 +1,7 @@
 use spse_predictive::graph::{WordGraph, WordNode, WordEdge};
 use spse_predictive::reasoning::ReasoningModule;
 use spse_predictive::spatial::SpatialGrid;
-use spse_predictive::walk::{compute_depth_limit, is_arithmetic_query, is_reachable, predict_next, resolve_start_node, secondary_signal, WalkConfig};
+use spse_predictive::walk::{compute_depth_limit, is_arithmetic_query, is_reachable, predict_next, resolve_start_node, secondary_signal, WalkConfig, WalkMode};
 
 // ---------------------------------------------------------------------------
 // Graph construction helpers
@@ -102,7 +102,7 @@ fn test_lexical_vector_empty_word() {
 fn test_predict_next_returns_next_token() {
     let graph = build_chain(&["the", "server", "is", "online", "."], "statement", "neutral", "tech", None, None);
     let reasoning = reasoning_with(&graph, "statement", "neutral", "tech");
-    let config = WalkConfig { target_year: None, depth_limit: 1 };
+    let config = WalkConfig { target_year: None, depth_limit: 1, mode: WalkMode::Forward };
 
     let next = predict_next("the", &graph, None, &reasoning, &config);
     assert_eq!(next, Some("server"));
@@ -112,7 +112,7 @@ fn test_predict_next_returns_next_token() {
 fn test_predict_next_returns_none_at_end_of_chain() {
     let graph = build_chain(&["hello", "world"], "statement", "neutral", "general", None, None);
     let reasoning = reasoning_with(&graph, "statement", "neutral", "general");
-    let config = WalkConfig { target_year: None, depth_limit: 1 };
+    let config = WalkConfig { target_year: None, depth_limit: 1, mode: WalkMode::Forward };
 
     // "world" has no outgoing edges
     let next = predict_next("world", &graph, None, &reasoning, &config);
@@ -158,7 +158,7 @@ fn test_predict_next_intent_bias_selects_correct_branch() {
     });
 
     let reasoning = reasoning_with(&graph, "statement", "neutral", "finance");
-    let config = WalkConfig { target_year: None, depth_limit: 1 };
+    let config = WalkConfig { target_year: None, depth_limit: 1, mode: WalkMode::Forward };
 
     let next = predict_next("bank", &graph, None, &reasoning, &config);
     assert_eq!(next, Some("closes"), "intent-biased edge should win");
@@ -197,7 +197,7 @@ fn test_predict_next_domain_bias_selects_correct_branch() {
     });
 
     let reasoning = reasoning_with(&graph, "statement", "neutral", "tech");
-    let config = WalkConfig { target_year: None, depth_limit: 1 };
+    let config = WalkConfig { target_year: None, depth_limit: 1, mode: WalkMode::Forward };
 
     let next = predict_next("data", &graph, None, &reasoning, &config);
     assert_eq!(next, Some("server"), "domain-biased edge should win");
@@ -238,7 +238,7 @@ fn test_predict_next_temporal_bias_prefers_closer_year() {
     });
 
     let reasoning = reasoning_with(&graph, "statement", "neutral", "tech");
-    let config = WalkConfig { target_year: Some(2026), depth_limit: 1 };
+    let config = WalkConfig { target_year: Some(2026), depth_limit: 1, mode: WalkMode::Forward };
 
     let next = predict_next("status", &graph, None, &reasoning, &config);
     assert_eq!(next, Some("online"), "temporally closer edge should win");
@@ -253,7 +253,7 @@ fn test_predict_next_oov_snaps_to_graph_and_continues() {
     // Graph only contains known word "server"
     let graph = build_chain(&["server", "online"], "statement", "neutral", "tech", None, None);
     let reasoning = reasoning_with(&graph, "statement", "neutral", "tech");
-    let config = WalkConfig { target_year: None, depth_limit: 1 };
+    let config = WalkConfig { target_year: None, depth_limit: 1, mode: WalkMode::Forward };
 
     // "srvr" is not in the graph — OOV fallback should snap to nearest node and return Some
     let result = predict_next("srvr", &graph, None, &reasoning, &config);
@@ -273,7 +273,7 @@ fn test_resolve_start_node_stops_at_punctuation() {
         "statement", "neutral", "tech", Some("server"), None,
     );
     let reasoning = reasoning_with(&graph, "statement", "neutral", "tech");
-    let config = WalkConfig { target_year: None, depth_limit: 1 };
+    let config = WalkConfig { target_year: None, depth_limit: 1, mode: WalkMode::Forward };
 
     let start = resolve_start_node("server", &graph, &reasoning, &config);
     // "The" is the first word after the sentence boundary "."
@@ -284,7 +284,7 @@ fn test_resolve_start_node_stops_at_punctuation() {
 fn test_resolve_start_node_returns_none_for_unknown_entity() {
     let graph = build_chain(&["hello", "world"], "statement", "neutral", "general", None, None);
     let reasoning = reasoning_with(&graph, "statement", "neutral", "general");
-    let config = WalkConfig { target_year: None, depth_limit: 1 };
+    let config = WalkConfig { target_year: None, depth_limit: 1, mode: WalkMode::Forward };
 
     let result = resolve_start_node("unknown_entity_xyz", &graph, &reasoning, &config);
     assert!(result.is_none());
@@ -408,7 +408,7 @@ fn test_predict_next_tier2_routes_via_nearby_node() {
 
     let spatial = SpatialGrid::build(graph.nodes.values().map(|n| (n.id, n.position)));
     let reasoning = reasoning_with(&graph, "statement", "neutral", "general");
-    let config = WalkConfig { target_year: None, depth_limit: 1 };
+    let config = WalkConfig { target_year: None, depth_limit: 1, mode: WalkMode::Forward };
 
     let next = predict_next("orphan", &graph, Some(&spatial), &reasoning, &config);
     assert_eq!(next, Some("result"), "Tier 2 should route via anchor's edge to result");
@@ -419,7 +419,7 @@ fn test_predict_next_tier2_not_triggered_when_tier1_succeeds() {
     let graph = build_chain(&["hello", "world"], "statement", "neutral", "general", None, None);
     let spatial = SpatialGrid::build(graph.nodes.values().map(|n| (n.id, n.position)));
     let reasoning = reasoning_with(&graph, "statement", "neutral", "general");
-    let config = WalkConfig { target_year: None, depth_limit: 1 };
+    let config = WalkConfig { target_year: None, depth_limit: 1, mode: WalkMode::Forward };
 
     let next = predict_next("hello", &graph, Some(&spatial), &reasoning, &config);
     assert_eq!(next, Some("world"), "Tier 1 direct edge should win when it exists");
@@ -630,7 +630,7 @@ fn test_resolve_start_node_prefers_temporally_close_source() {
 
     let mut reasoning = ReasoningModule::new(&graph);
     reasoning.update_context("statement", "neutral", "tech", &["server".to_string()]);
-    let config = WalkConfig { target_year: Some(2026), depth_limit: 1 };
+    let config = WalkConfig { target_year: Some(2026), depth_limit: 1, mode: WalkMode::Forward };
 
     let result = resolve_start_node("server", &graph, &reasoning, &config);
     assert_eq!(
@@ -778,7 +778,7 @@ fn test_predict_next_tier3_reroutes_via_ancestor() {
     });
 
     let reasoning = reasoning_with(&graph, "statement", "neutral", "general");
-    let config = WalkConfig { target_year: None, depth_limit: 1 };
+    let config = WalkConfig { target_year: None, depth_limit: 1, mode: WalkMode::Forward };
 
     // dead_end has no outgoing edges — Tier 1 and Tier 2 (None) fail → Tier 3 fires.
     let result = predict_next("dead_end", &graph, None, &reasoning, &config);
@@ -818,7 +818,7 @@ fn test_predict_next_tier3_does_not_loop_back_to_dead_end() {
     });
 
     let reasoning = reasoning_with(&graph, "statement", "neutral", "general");
-    let config = WalkConfig { target_year: None, depth_limit: 1 };
+    let config = WalkConfig { target_year: None, depth_limit: 1, mode: WalkMode::Forward };
 
     let result = predict_next("dead_end", &graph, None, &reasoning, &config);
     assert_ne!(result, Some("dead_end"), "Tier 3 must not loop back to the dead-end node");
@@ -830,7 +830,171 @@ fn test_predict_next_tier3_does_not_loop_back_to_dead_end() {
 fn test_predict_next_tier3_returns_none_when_no_ancestors() {
     let graph = build_chain(&["orphan"], "statement", "neutral", "general", None, None);
     let reasoning = reasoning_with(&graph, "statement", "neutral", "general");
-    let config = WalkConfig { target_year: None, depth_limit: 1 };
+    let config = WalkConfig { target_year: None, depth_limit: 1, mode: WalkMode::Forward };
     let result = predict_next("orphan", &graph, None, &reasoning, &config);
     assert_eq!(result, None, "orphan node with no ancestors should return None");
+}
+
+// ---------------------------------------------------------------------------
+// ReasoningModule::reset_session
+// ---------------------------------------------------------------------------
+
+/// After reset, all four stacks must be empty.
+#[test]
+fn test_reset_session_clears_all_stacks() {
+    let graph = build_chain(&["a", "b"], "statement", "neutral", "general", None, None);
+    let mut r = ReasoningModule::new(&graph);
+    r.update_context("question", "polite", "tech", &["server".to_string()]);
+
+    r.reset_session();
+
+    assert!(r.session.intent_stack.is_empty(),  "intent_stack must be empty after reset");
+    assert!(r.session.tone_stack.is_empty(),    "tone_stack must be empty after reset");
+    assert!(r.session.domain_stack.is_empty(),  "domain_stack must be empty after reset");
+    assert!(r.session.entity_stack.is_empty(),  "entity_stack must be empty after reset");
+}
+
+/// reset_session must be idempotent — calling it twice on an already-empty
+/// module must not panic.
+#[test]
+fn test_reset_session_is_idempotent() {
+    let graph = build_chain(&["a", "b"], "statement", "neutral", "general", None, None);
+    let mut r = ReasoningModule::new(&graph);
+    r.reset_session();
+    r.reset_session(); // must not panic
+    assert!(r.session.intent_stack.is_empty());
+}
+
+/// After reset, update_context must work normally — only the new frame is
+/// present, with no residue from before the reset.
+#[test]
+fn test_reset_session_then_update_context_fresh_state() {
+    let graph = build_chain(&["a", "b"], "statement", "neutral", "general", None, None);
+    let mut r = ReasoningModule::new(&graph);
+    r.update_context("command", "angry", "finance", &["bank".to_string()]);
+
+    r.reset_session();
+    r.update_context("explain", "neutral", "science", &["quantum".to_string()]);
+
+    assert_eq!(r.session.intent_stack.len(), 1);
+    assert_eq!(r.session.intent_stack[0], "explain");
+    assert_eq!(r.session.domain_stack[0], "science");
+    assert_eq!(r.session.entity_stack[0], "quantum");
+    // No residue from the pre-reset frame
+    assert!(!r.session.intent_stack.contains(&"command".to_string()));
+    assert!(!r.session.entity_stack.contains(&"bank".to_string()));
+}
+
+// ---------------------------------------------------------------------------
+// WalkMode::Explain — breadth-first (high out-degree preference)
+// ---------------------------------------------------------------------------
+
+/// Explain mode selects the target with the most onward edges, not the
+/// highest-weighted edge.  Build a fork where one branch has more onward edges
+/// and verify Explain mode picks it over the heavier-weighted but leaf branch.
+#[test]
+fn test_predict_next_explain_mode_prefers_high_out_degree() {
+    let mut graph = WordGraph::new();
+
+    for tok in &["src", "leaf", "hub", "a", "b", "c"] {
+        let id = WordGraph::generate_id(tok);
+        graph.by_surface.insert(tok.to_string(), id);
+        graph.nodes.entry(id).or_insert(WordNode {
+            id, surface: tok.to_string(), frequency: 1,
+            position: [0.0; 3], lexical_vector: WordNode::compute_lexical_vector(tok),
+        });
+    }
+
+    let src_id  = WordGraph::generate_id("src");
+    let leaf_id = WordGraph::generate_id("leaf");
+    let hub_id  = WordGraph::generate_id("hub");
+
+    // src → leaf  (weight 2.0 — heavier, but leaf is a dead-end)
+    graph.edges.push(WordEdge {
+        from: src_id, to: leaf_id, weight: 2.0,
+        intent: "explain".to_string(), tone: "neutral".to_string(),
+        domain: "science".to_string(), entity: None, dated: None,
+    });
+    // src → hub  (weight 1.0 — lighter, but hub has 3 onward edges)
+    graph.edges.push(WordEdge {
+        from: src_id, to: hub_id, weight: 1.0,
+        intent: "explain".to_string(), tone: "neutral".to_string(),
+        domain: "science".to_string(), entity: None, dated: None,
+    });
+    // hub → a, hub → b, hub → c
+    for tok in &["a", "b", "c"] {
+        let to_id = WordGraph::generate_id(tok);
+        graph.edges.push(WordEdge {
+            from: hub_id, to: to_id, weight: 1.0,
+            intent: "explain".to_string(), tone: "neutral".to_string(),
+            domain: "science".to_string(), entity: None, dated: None,
+        });
+    }
+
+    let reasoning = reasoning_with(&graph, "explain", "neutral", "science");
+    let config = WalkConfig { target_year: None, depth_limit: 2, mode: WalkMode::Explain };
+
+    let result = predict_next("src", &graph, None, &reasoning, &config);
+    assert_eq!(result, Some("hub"), "Explain mode must prefer hub (3 onward edges) over leaf (0 edges)");
+}
+
+// ---------------------------------------------------------------------------
+// WalkMode::Question — answer-anchor proximity
+// ---------------------------------------------------------------------------
+
+/// Question mode selects the edge whose target is topologically closest to the
+/// active entity anchor.  Build a fork: one branch leads toward the anchor in
+/// 1 hop; the other is a dead-end.  Question mode must pick the closer branch.
+#[test]
+fn test_predict_next_question_mode_routes_toward_entity_anchor() {
+    let mut graph = WordGraph::new();
+
+    for tok in &["src", "near", "far", "answer"] {
+        let id = WordGraph::generate_id(tok);
+        graph.by_surface.insert(tok.to_string(), id);
+        graph.nodes.entry(id).or_insert(WordNode {
+            id, surface: tok.to_string(), frequency: 1,
+            position: [0.0; 3], lexical_vector: WordNode::compute_lexical_vector(tok),
+        });
+    }
+
+    let src_id    = WordGraph::generate_id("src");
+    let near_id   = WordGraph::generate_id("near");
+    let far_id    = WordGraph::generate_id("far");
+    let answer_id = WordGraph::generate_id("answer");
+
+    // src → near → answer  (2 hops total; near is 1 hop from answer)
+    graph.edges.push(WordEdge {
+        from: src_id, to: near_id, weight: 1.0,
+        intent: "question".to_string(), tone: "neutral".to_string(),
+        domain: "general".to_string(), entity: None, dated: None,
+    });
+    graph.edges.push(WordEdge {
+        from: near_id, to: answer_id, weight: 1.0,
+        intent: "question".to_string(), tone: "neutral".to_string(),
+        domain: "general".to_string(), entity: None, dated: None,
+    });
+    // src → far  (dead-end, no path to answer)
+    graph.edges.push(WordEdge {
+        from: src_id, to: far_id, weight: 2.0, // heavier weight — must still lose
+        intent: "question".to_string(), tone: "neutral".to_string(),
+        domain: "general".to_string(), entity: None, dated: None,
+    });
+
+    let mut reasoning = ReasoningModule::new(&graph);
+    reasoning.update_context("question", "neutral", "general", &["answer".to_string()]);
+    let config = WalkConfig { target_year: None, depth_limit: 1, mode: WalkMode::Question };
+
+    let result = predict_next("src", &graph, None, &reasoning, &config);
+    assert_eq!(result, Some("near"), "Question mode must route toward the entity anchor");
+}
+
+/// WalkMode::from_intent must map correctly for all known intent strings.
+#[test]
+fn test_walk_mode_from_intent_mapping() {
+    assert_eq!(WalkMode::from_intent("explain"),   WalkMode::Explain);
+    assert_eq!(WalkMode::from_intent("question"),  WalkMode::Question);
+    assert_eq!(WalkMode::from_intent("statement"), WalkMode::Forward);
+    assert_eq!(WalkMode::from_intent("command"),   WalkMode::Forward);
+    assert_eq!(WalkMode::from_intent("unknown"),   WalkMode::Forward);
 }

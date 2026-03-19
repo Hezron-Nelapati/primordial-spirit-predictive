@@ -51,6 +51,17 @@ impl<'a> ReasoningModule<'a> {
         sanitized
     }
 
+    /// Reset all four session stacks to empty.
+    ///
+    /// Use this between independent conversations or demo scenarios to prevent
+    /// context from a prior exchange from biasing the next walk.
+    pub fn reset_session(&mut self) {
+        self.session.intent_stack.clear();
+        self.session.tone_stack.clear();
+        self.session.domain_stack.clear();
+        self.session.entity_stack.clear();
+    }
+
     /// Updates the sessional stack based on new ML parses.
     pub fn update_context(&mut self, intent: &str, tone: &str, domain: &str, entities: &[String]) {
         self.session.intent_stack.push(intent.to_string());

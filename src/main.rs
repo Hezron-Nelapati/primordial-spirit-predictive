@@ -2,15 +2,16 @@ use spse_predictive::graph::WordGraph;
 use spse_predictive::ingest::{ingest_v2_rows, V2JsonData};
 use spse_predictive::reasoning::ReasoningModule;
 use spse_predictive::spatial::SpatialGrid;
-use spse_predictive::walk::{compute_depth_limit, is_arithmetic_query, is_reachable, predict_next, secondary_signal, WalkConfig};
+use spse_predictive::walk::{compute_depth_limit, is_arithmetic_query, is_reachable, predict_next, secondary_signal, WalkConfig, WalkMode};
 use std::fs;
 use std::process::Command;
 
 /// Classify `query` using the trained centroid model via `python/classify_query.py`.
-/// Returns `(intent, tone, domain)` or `None` if Python / the model is unavailable.
-fn classify_query(query: &str) -> Option<(String, String, String)> {
+/// Returns `(intent, tone, domain, entities)` or `None` if Python / the model is unavailable.
+fn classify_query(query: &str) -> Option<(String, String, String, Vec<String>)> {
+    let session_id = std::process::id().to_string();
     let output = Command::new("python3")
-        .args(["python/classify_query.py", query])
+        .args(["python/classify_query.py", query, "--session-id", &session_id])
         .output()
         .ok()?;
 
@@ -20,7 +21,11 @@ fn classify_query(query: &str) -> Option<(String, String, String)> {
         let intent = v["intent"].as_str()?.to_string();
         let tone   = v["tone"].as_str()?.to_string();
         let domain = v["domain"].as_str()?.to_string();
-        Some((intent, tone, domain))
+        let entities: Vec<String> = v["entities"]
+            .as_array()
+            .map(|arr| arr.iter().filter_map(|e| e.as_str().map(str::to_string)).collect())
+            .unwrap_or_default();
+        Some((intent, tone, domain, entities))
     } else {
         None
     }
@@ -175,23 +180,27 @@ fn main() {
 
         // Attempt live ML classification; fall back to user-supplied domain + safe defaults.
         println!("\n  [CLASSIFIER]: Running centroid-based intent/tone/domain classification...");
-        let (intent, tone, effective_domain) = match classify_query(query) {
-            Some((i, t, d)) => {
-                println!("  [CLASSIFIER]: intent='{}' tone='{}' domain='{}'", i, t, d);
-                (i, t, d)
+        let (intent, tone, effective_domain, ner_entities) = match classify_query(query) {
+            Some((i, t, d, e)) => {
+                println!("  [CLASSIFIER]: intent='{}' tone='{}' domain='{}' entities={:?}", i, t, d, e);
+                (i, t, d, e)
             }
             None => {
                 println!("  [CLASSIFIER]: Unavailable — falling back to defaults (domain: '{}').", domain);
-                ("question".to_string(), "neutral".to_string(), domain.to_string())
+                ("question".to_string(), "neutral".to_string(), domain.to_string(), vec![])
             }
         };
 
         let depth = compute_depth_limit(entity, &graph);
         println!("  [TOPOLOGY]: Entity '{}' → {} reachable-2-hop nodes → depth_limit={}", entity, depth, depth);
 
+        // Merge CLI-supplied primary entity with any NER-extracted entities from the query.
+        let mut all_entities: Vec<String> = vec![entity.clone()];
+        all_entities.extend(ner_entities);
+
         let mut reasoning = ReasoningModule::new(&graph);
-        reasoning.update_context(&intent, &tone, &effective_domain, &[entity.clone()]);
-        let config = WalkConfig { target_year: year, depth_limit: depth };
+        reasoning.update_context(&intent, &tone, &effective_domain, &all_entities);
+        let config = WalkConfig { target_year: year, depth_limit: depth, mode: WalkMode::from_intent(&intent) };
 
         // Multi-signal reachability guard: abort before generation if a secondary
         // graph-resident entity in the query is not topologically reachable from
@@ -223,32 +232,37 @@ fn main() {
 
     println!("\n=========== 💬 DYNAMIC CHATBOT MVP 💬 ===========");
     let mut reasoning = ReasoningModule::new(&graph);
-    
-    // Test: Axiomatic Domain Tie Break (No hardcodes!)
+
+    // Scenario 1: Axiomatic Domain Tie Break — same entity, two different years.
     reasoning.update_context("question", "neutral", "tech", &["server".to_string()]);
-    let conf1 = WalkConfig { target_year: Some(2026), depth_limit: 1 };
-    let ans1 = generate_dynamic_answer("Are the servers online?", "server", &graph, None, &mut reasoning, &conf1);
+    let depth1 = compute_depth_limit("server", &graph);
+    let conf1 = WalkConfig { target_year: Some(2026), depth_limit: depth1, mode: WalkMode::Question };
+    let ans1 = generate_dynamic_answer("Are the servers online?", "server", &graph, Some(&spatial), &mut reasoning, &conf1);
     println!("  -> [BOT_OUTPUT]: \"{}\"", ans1);
-    
+
     reasoning.update_context("question", "neutral", "tech", &["server".to_string()]);
-    let conf2 = WalkConfig { target_year: Some(2020), depth_limit: 1 };
-    let ans2 = generate_dynamic_answer("Was it offline back in 2020?", "server", &graph, None, &mut reasoning, &conf2);
+    let conf2 = WalkConfig { target_year: Some(2020), depth_limit: depth1, mode: WalkMode::Question };
+    let ans2 = generate_dynamic_answer("Was it offline back in 2020?", "server", &graph, Some(&spatial), &mut reasoning, &conf2);
     println!("  -> [BOT_OUTPUT]: \"{}\"", ans2);
-    
+
+    // Scenario 2: Finance domain — bank closing time.
+    reasoning.reset_session();
     println!("\n[USER_QUERY]: \"When does the bank close?\"");
-    // If the user asks a question, the target structural retrieval intent is a STATEMENT (Fact), not another question!
     reasoning.update_context("statement", "neutral", "finance", &["bank".to_string()]);
-    let conf3 = WalkConfig { target_year: None, depth_limit: 1 };
-    let ans3 = generate_dynamic_answer("When does the bank close?", "bank", &graph, None, &mut reasoning, &conf3);
+    let depth3 = compute_depth_limit("bank", &graph);
+    let conf3 = WalkConfig { target_year: None, depth_limit: depth3, mode: WalkMode::Forward };
+    let ans3 = generate_dynamic_answer("When does the bank close?", "bank", &graph, Some(&spatial), &mut reasoning, &conf3);
     println!("  -> [BOT_OUTPUT]: \"{}\"", ans3);
-    
+
+    // Scenario 3: Pronoun resolution + secondary-signal reachability guard.
+    // NOTE: intentionally NO reset here — "bank" must remain on the entity_stack
+    // so the pronoun "there" can resolve to it via entity_stack lookup.
     let query4 = "Is there an ATM there?";
     println!("\n[USER_QUERY]: \"{}\"", query4);
     reasoning.update_context("statement", "neutral", "finance", &["Pronoun".to_string()]);
-    let conf4 = WalkConfig { target_year: None, depth_limit: 1 };
+    let depth4 = compute_depth_limit("bank", &graph); // primary resolved from stack
+    let conf4 = WalkConfig { target_year: None, depth_limit: depth4, mode: WalkMode::Forward };
 
-    // Multi-Signal validation: resolve primary entity from stack, then scan query
-    // for a secondary graph-resident signal and perform BFS reachability check.
     let primary4 = reasoning.session.entity_stack
         .iter().rev()
         .find(|e| e.as_str() != "Pronoun")
@@ -261,19 +275,21 @@ fn main() {
         if !is_reachable(primary4, secondary, &graph, 10) {
             println!("  -> [BOT_OUTPUT]: System Fault: [{}] is not topologically reachable from [{}]. Structural Abort to prevent hallucination!", secondary, primary4);
         } else {
-            let ans4 = generate_dynamic_answer(query4, "Pronoun", &graph, None, &mut reasoning, &conf4);
+            let ans4 = generate_dynamic_answer(query4, "Pronoun", &graph, Some(&spatial), &mut reasoning, &conf4);
             println!("  -> [BOT_OUTPUT]: \"{}\"", ans4);
         }
     } else {
-        let ans4 = generate_dynamic_answer(query4, "Pronoun", &graph, None, &mut reasoning, &conf4);
+        let ans4 = generate_dynamic_answer(query4, "Pronoun", &graph, Some(&spatial), &mut reasoning, &conf4);
         println!("  -> [BOT_OUTPUT]: \"{}\"", ans4);
     }
 
-    // Test: Topological Density limits
+    // Scenario 4: Topological density — depth driven by graph topology, not a hardcode.
+    reasoning.reset_session();
     reasoning.update_context("explain", "neutral", "science", &["quantum".to_string()]);
-    let conf5 = WalkConfig { target_year: None, depth_limit: 3 };
-    let ans5 = generate_dynamic_answer("Explain quantum mechanics.", "quantum", &graph, None, &mut reasoning, &conf5);
+    let depth5 = compute_depth_limit("quantum", &graph);
+    let conf5 = WalkConfig { target_year: None, depth_limit: depth5, mode: WalkMode::Explain };
+    let ans5 = generate_dynamic_answer("Explain quantum mechanics.", "quantum", &graph, Some(&spatial), &mut reasoning, &conf5);
     println!("  -> [BOT_OUTPUT]: \"{}\"", ans5);
-    
+
     println!("\n=================================================\n");
 }
