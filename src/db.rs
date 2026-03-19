@@ -27,7 +27,12 @@ impl GraphDb {
         // busy_timeout: SQLite will retry internally for up to 5 s if another
         // process holds a write lock, then return SQLITE_BUSY as an Err.
         conn.execute_batch(
-            "PRAGMA journal_mode=WAL; PRAGMA synchronous=NORMAL; PRAGMA busy_timeout=5000;",
+            "PRAGMA journal_mode=WAL;
+             PRAGMA synchronous=NORMAL;
+             PRAGMA busy_timeout=5000;
+             PRAGMA cache_size=-65536;
+             PRAGMA mmap_size=268435456;
+             PRAGMA temp_store=MEMORY;",
         )?;
         let db = Self { conn };
         db.create_schema()?;
@@ -148,21 +153,28 @@ impl GraphDb {
 
 impl GraphAccess for GraphDb {
     fn surface_to_id(&self, surface: &str) -> Option<NodeId> {
-        self.conn.query_row(
-            "SELECT id FROM nodes WHERE surface = ?1",
-            [surface],
-            |row| row.get::<_, i64>(0).map(|id| id as NodeId),
-        ).ok()
+        // prepare_cached reuses the compiled statement across calls — avoids
+        // re-parsing SQL on every walk step (called ~50× per query in hot path).
+        self.conn
+            .prepare_cached("SELECT id FROM nodes WHERE surface = ?1")
+            .ok()
+            .and_then(|mut stmt| {
+                stmt.query_row([surface], |row| {
+                    row.get::<_, i64>(0).map(|id| id as NodeId)
+                })
+                .ok()
+            })
     }
 
     fn node_by_id(&self, id: NodeId) -> Option<WordNode> {
-        self.conn.query_row(
-            "SELECT id, surface, frequency, pos_x, pos_y, pos_z,
-                    lv0, lv1, lv2, lv3, lv4
-             FROM nodes WHERE id = ?1",
-            [id as i64],
-            Self::row_to_node,
-        ).ok()
+        self.conn
+            .prepare_cached(
+                "SELECT id, surface, frequency, pos_x, pos_y, pos_z,
+                        lv0, lv1, lv2, lv3, lv4
+                 FROM nodes WHERE id = ?1",
+            )
+            .ok()
+            .and_then(|mut stmt| stmt.query_row([id as i64], Self::row_to_node).ok())
     }
 
     fn edges_from(&self, from_id: NodeId) -> Vec<WordEdge> {

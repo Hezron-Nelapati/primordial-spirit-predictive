@@ -5,7 +5,7 @@ use spse_predictive::reasoning::{ReasoningModule, SessionalMemory};
 use spse_predictive::spatial::SpatialGrid;
 use spse_predictive::reasoning::{evaluate_arithmetic, extract_year_from_query, is_arithmetic_query};
 use spse_predictive::walk::{compute_depth_limit, is_reachable, predict_next, secondary_signal, WalkConfig, WalkMode};
-use std::collections::{HashMap, VecDeque};
+use std::collections::HashMap;
 use std::fs;
 use std::io::{self, BufRead, Write};
 use std::process::Command;
@@ -93,19 +93,20 @@ fn generate_dynamic_answer(
     let mut current = start_node;
     let mut sentence_count = 0;
     // Rolling position window (last 5 visited nodes) for Tier 2 centroid search.
-    // VecDeque gives O(1) front-removal vs Vec's O(N) shift.
+    // Vec with remove(0) is O(N) but N=5 so the shift is 5 × 12-byte copies —
+    // cheaper than VecDeque which requires collect() into a new Vec every step
+    // (heap allocation per iteration) just to produce the &[[f32;3]] slice.
     const POS_WINDOW: usize = 5;
-    let mut pos_history: VecDeque<[f32; 3]> = VecDeque::with_capacity(POS_WINDOW + 1);
+    let mut pos_history: Vec<[f32; 3]> = Vec::with_capacity(POS_WINDOW);
 
     for _ in 0..50 {
-        // predict_next expects a slice; convert deque to a temporary vec for the call.
-        let pos_slice: Vec<[f32; 3]> = pos_history.iter().copied().collect();
-        if let Some(next_word) = predict_next(&current, graph, spatial, reasoning, config, &pos_slice) {
+        // Vec<[f32; 3]> derefs to &[[f32; 3]] — no intermediate allocation needed.
+        if let Some(next_word) = predict_next(&current, graph, spatial, reasoning, config, &pos_history) {
             // Record position of current node before advancing.
             if let Some(id) = graph.surface_to_id(&current) {
                 if let Some(node) = graph.node_by_id(id) {
-                    if pos_history.len() >= POS_WINDOW { pos_history.pop_front(); }
-                    pos_history.push_back(node.position);
+                    if pos_history.len() >= POS_WINDOW { pos_history.remove(0); }
+                    pos_history.push(node.position);
                 }
             }
             if next_word == "." || next_word == "?" || next_word == "!" {

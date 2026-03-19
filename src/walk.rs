@@ -1,7 +1,7 @@
 use crate::graph::{GraphAccess, NodeId, WordEdge};
 use crate::reasoning::ReasoningModule;
 use crate::spatial::SpatialGrid;
-use std::collections::{HashSet, VecDeque};
+use std::collections::{HashMap, HashSet, VecDeque};
 
 /// Controls the traversal strategy used by `predict_next`.
 ///
@@ -192,10 +192,15 @@ fn score_edges_explain(edges: &[WordEdge], graph: &dyn GraphAccess) -> Option<St
     })
 }
 
-/// Question mode: prefer the edge whose target node is closest (in outgoing hops)
+/// Question mode: prefer the edge whose target node is closest (in forward hops)
 /// to the active entity anchor — routes toward a known answer rather than
 /// extending the current chain linearly.
 /// Falls back to the first edge when no entity is set or no path closes.
+///
+/// Uses a single reverse-BFS from `target_id` instead of N independent forward
+/// BFS calls (one per candidate edge).  The reverse-BFS visits each reachable
+/// predecessor once and records its distance to the target.  For N candidates
+/// the old approach was O(N × E × max_hops); this is O(E × max_hops) total.
 fn score_edges_question(
     edges: &[WordEdge],
     graph: &dyn GraphAccess,
@@ -209,9 +214,10 @@ fn score_edges_question(
         }
     };
 
-    // Pick the edge whose target has the shortest forward-hop distance to the entity.
-    // Distance is approximated by a bounded BFS (max 5 hops); unreachable = usize::MAX.
-    let best = edges.iter().min_by_key(|e| bfs_distance(e.to, target_id, graph, 5));
+    // One reverse-BFS from target; look up each candidate in the result map.
+    let dist = reverse_bfs_distances(target_id, graph, 5);
+    let best = edges.iter()
+        .min_by_key(|e| dist.get(&e.to).copied().unwrap_or(usize::MAX));
 
     best.and_then(|e| graph.node_by_id(e.to).map(|n| {
         eprintln!("      [QUESTION_MODE] Selected node [{}] as closest to entity anchor [{}].",
@@ -220,24 +226,29 @@ fn score_edges_question(
     }))
 }
 
-/// BFS hop distance from `from_id` to `to_id`, bounded at `max_hops`.
-/// Returns `usize::MAX` if unreachable within the bound.
-fn bfs_distance(from_id: u64, to_id: u64, graph: &dyn GraphAccess, max_hops: usize) -> usize {
-    if from_id == to_id { return 0; }
-    let mut visited: HashSet<u64> = HashSet::new();
+/// Single backward BFS from `target_id` following reverse edges.
+/// Returns a map of `node_id → hops_to_target` for every predecessor reachable
+/// within `max_hops` steps.  Used by `score_edges_question` to rank candidates
+/// with one traversal instead of one traversal per candidate.
+fn reverse_bfs_distances(
+    target_id: u64,
+    graph: &dyn GraphAccess,
+    max_hops: usize,
+) -> HashMap<u64, usize> {
+    let mut dist: HashMap<u64, usize> = HashMap::new();
     let mut queue: VecDeque<(u64, usize)> = VecDeque::new();
-    queue.push_back((from_id, 0));
-    visited.insert(from_id);
+    dist.insert(target_id, 0);
+    queue.push_back((target_id, 0));
     while let Some((node, hops)) = queue.pop_front() {
         if hops >= max_hops { continue; }
-        for edge in graph.edges_from(node) {
-            if edge.to == to_id { return hops + 1; }
-            if visited.insert(edge.to) {
-                queue.push_back((edge.to, hops + 1));
+        for edge in graph.edges_to(node) {
+            if !dist.contains_key(&edge.from) {
+                dist.insert(edge.from, hops + 1);
+                queue.push_back((edge.from, hops + 1));
             }
         }
     }
-    usize::MAX
+    dist
 }
 
 /// Score a candidate edge slice and return the surface of the highest-weighted target node.
@@ -256,8 +267,9 @@ fn score_edges(
 
     for edge in edges {
         let mut adj_weight = edge.weight;
-        let target_surface = graph.node_by_id(edge.to).map(|n| n.surface).unwrap_or_default();
-        eprintln!("      └─ Scanning Edge toward: [{}]", target_surface);
+        // Log node id rather than fetching surface — avoids a SQL query per
+        // candidate edge purely for trace output.
+        eprintln!("      └─ Scanning Edge toward node#{}", edge.to);
 
         if edge.intent == active_intent {
             adj_weight *= 2.0;
