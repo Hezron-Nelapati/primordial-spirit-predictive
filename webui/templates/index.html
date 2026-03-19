@@ -580,17 +580,17 @@
           <i class="step-icon">1</i>
           <span class="step-name">Check / download corpus</span>
         </div>
-        <div class="step-item" id="s-v2">
+        <div class="step-item" id="s-base">
           <i class="step-icon">2</i>
-          <span class="step-name">V2 corpus ingest</span>
+          <span class="step-name">Base corpus ingest</span>
         </div>
         <div class="step-item" id="s-reinforce">
           <i class="step-icon">3</i>
           <span class="step-name">Edge reinforcement (N× passes)</span>
         </div>
-        <div class="step-item" id="s-v3">
+        <div class="step-item" id="s-wiki">
           <i class="step-icon">4</i>
-          <span class="step-name">V3 Wikipedia ingest (optional)</span>
+          <span class="step-name">Wikipedia ingest (optional)</span>
         </div>
         <div class="step-item" id="s-centroids">
           <i class="step-icon">5</i>
@@ -622,12 +622,18 @@ function toggleDrawer() {
 function openDrawer() {
   drawerOpen = true;
   document.getElementById('trainDrawer').classList.add('open');
-  document.getElementById('trainToggle').textContent = '✕  Close';
+  document.getElementById('chatPanel').style.marginRight = '420px';
+  // Use innerHTML so the indicator span stays in the DOM — textContent would
+  // strip it, breaking syncTrainIndicator() which queries #trainIndicator.
+  const btn = document.getElementById('trainToggle');
+  btn.innerHTML = '<span class="indicator" id="trainIndicator"></span> ✕ Close';
+  syncTrainIndicator();
 }
 
 function closeDrawer() {
   drawerOpen = false;
   document.getElementById('trainDrawer').classList.remove('open');
+  document.getElementById('chatPanel').style.marginRight = '';
   const btn = document.getElementById('trainToggle');
   btn.innerHTML = '<span class="indicator" id="trainIndicator"></span> Train Model';
   syncTrainIndicator();
@@ -757,11 +763,15 @@ async function sendQuery() {
     const data = await res.json();
     removeTypingIndicator();
 
+    const badges = [];
+    if (data.entity) badges.push(`<span class="badge">entity: ${escHtml(data.entity)}</span>`);
+    if (data.domain) badges.push(`<span class="badge">domain: ${escHtml(data.domain)}</span>`);
+    if (data.intent) badges.push(`<span class="badge">intent: ${escHtml(data.intent)}</span>`);
+    if (data.tone)   badges.push(`<span class="badge">tone: ${escHtml(data.tone)}</span>`);
     const row = appendMessage(
       data.error ? 'bot error' : 'bot',
       escHtml(data.answer),
-      data.entity ? `<span class="badge">entity: ${escHtml(data.entity)}</span>
-                     <span class="badge">domain: ${escHtml(data.domain)}</span>` : '',
+      badges.join(' '),
       data.trace || '',
     );
   } catch (err) {
@@ -786,12 +796,12 @@ let trainingDone    = false;
 let trainingError   = null;
 let trainEvt        = null;
 
-// Step ↔ log-tag mapping
+// Step ↔ log-tag mapping — keywords must match train_pipeline.py log output exactly.
 const STEP_MAP = [
-  { id: 's-corpus',    keywords: ['checking corpus', 'downloading wikipedia', 'v2 corpus', 'v3 wikipedia corpus already'] },
-  { id: 's-v2',        keywords: ['v2 corpus ingest', 'v2 ingest'] },
+  { id: 's-corpus',    keywords: ['checking corpus', 'downloading wikipedia corpus', 'bootstrapping centroids', 'wikipedia corpus already', 'base corpus (corpus.txt) present'] },
+  { id: 's-base',      keywords: ['base corpus ingest', 'running base corpus'] },
   { id: 's-reinforce', keywords: ['reinforcing graph', 'edge reinforcement'] },
-  { id: 's-v3',        keywords: ['v3 wikipedia ingest', 'v3 corpus', 'v3 ingest', 'v3'] },
+  { id: 's-wiki',      keywords: ['wikipedia ingest', 'running wikipedia', 'wikipedia corpus absent'] },
   { id: 's-centroids', keywords: ['training centroid', 'centroid classifier'] },
   { id: 's-db',        keywords: ['resetting graph', 'graph database'] },
 ];
@@ -964,6 +974,44 @@ function showBanner(success, text) {
   b.style.display = 'block';
 }
 
+// ── System ready check ────────────────────────────────────────────────────────
+let _readyBanner = null;
+
+function _showReadyBanner(text, isError) {
+  if (_readyBanner) _readyBanner.remove();
+  _readyBanner = document.createElement('div');
+  _readyBanner.style.cssText = `
+    position: fixed; bottom: 70px; left: 50%; transform: translateX(-50%);
+    padding: 0.5rem 1.1rem; border-radius: 20px; font-size: 0.8rem;
+    font-weight: 500; z-index: 200; pointer-events: none;
+    background: ${isError ? '#1f0d0d' : '#0d1f12'};
+    border: 1px solid ${isError ? 'var(--red)' : 'var(--green)'};
+    color: ${isError ? 'var(--red)' : 'var(--green)'};
+  `;
+  _readyBanner.textContent = text;
+  document.body.appendChild(_readyBanner);
+}
+
+function _checkReady() {
+  fetch('/health').then(r => r.json()).then(h => {
+    if (!h.ready) {
+      _showReadyBanner('⏳ Graph engine starting — run Training if this persists', true);
+      // Re-check every 3 s until ready
+      setTimeout(_checkReady, 3000);
+    } else {
+      if (_readyBanner) {
+        _readyBanner.textContent = '✓ System ready';
+        _readyBanner.style.background = '#0d1f12';
+        _readyBanner.style.borderColor = 'var(--green)';
+        _readyBanner.style.color = 'var(--green)';
+        setTimeout(() => { if (_readyBanner) { _readyBanner.remove(); _readyBanner = null; } }, 2500);
+      }
+    }
+  }).catch(() => {
+    _showReadyBanner('⚠ Cannot reach server', true);
+  });
+}
+
 // Validate passes input: can only increase (min 10)
 document.addEventListener('DOMContentLoaded', () => {
   const p = document.getElementById('passesInput');
@@ -972,6 +1020,8 @@ document.addEventListener('DOMContentLoaded', () => {
     if (isNaN(v) || v < 10) p.value = 10;
   });
   document.getElementById('queryInput').focus();
+  // Check if Rust graph engine is ready on load
+  _checkReady();
 });
 </script>
 
