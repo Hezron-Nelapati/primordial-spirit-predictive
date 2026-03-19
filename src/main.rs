@@ -1,8 +1,8 @@
-use spse_predictive::graph::{WordGraph, WordNode, WordEdge};
+use spse_predictive::graph::WordGraph;
+use spse_predictive::ingest::{ingest_v2_rows, V2JsonData};
 use spse_predictive::reasoning::ReasoningModule;
 use spse_predictive::spatial::SpatialGrid;
-use spse_predictive::walk::{compute_depth_limit, is_reachable, predict_next, WalkConfig};
-use serde::Deserialize;
+use spse_predictive::walk::{compute_depth_limit, is_arithmetic_query, is_reachable, predict_next, secondary_signal, WalkConfig};
 use std::fs;
 use std::process::Command;
 
@@ -48,17 +48,6 @@ fn llm_style(fact: &str, query: &str) -> Option<String> {
     } else {
         None
     }
-}
-
-#[derive(Deserialize, Debug)]
-pub struct V2JsonData {
-    pub text: String,
-    pub tokens: Vec<String>,
-    pub intent: String,
-    pub tone: String,
-    pub domain: String,
-    pub entities: Vec<String>,
-    pub dated: Option<u16>,
 }
 
 use spse_predictive::walk::resolve_start_node;
@@ -119,49 +108,6 @@ fn generate_dynamic_answer(
     output
 }
 
-/// Ingest a slice of deserialised JSON rows into an existing graph.
-/// Shared surface tokens accumulate edge weight from every corpus they appear in.
-fn ingest_rows(graph: &mut WordGraph, rows: Vec<V2JsonData>) {
-    for row in rows {
-        let mut prev_id = None;
-        for token in row.tokens {
-            let id = WordGraph::generate_id(&token);
-            graph.by_surface.insert(token.clone(), id);
-
-            let node = graph.nodes.entry(id).or_insert_with(|| {
-                let lv  = WordNode::compute_lexical_vector(&token);
-                let len = lv[0];
-                let pos = [
-                    len,
-                    if len > 0.0 { lv[3] / len } else { 0.0 }, // vowel density
-                    if len > 0.0 { lv[4] / len } else { 0.0 }, // uniqueness density
-                ];
-                WordNode {
-                    id,
-                    surface: token.clone(),
-                    frequency: 0,
-                    position: pos,
-                    lexical_vector: lv,
-                }
-            });
-            node.frequency += 1;
-
-            if let Some(prev) = prev_id {
-                graph.edges.push(WordEdge {
-                    from: prev,
-                    to: id,
-                    weight: 1.0,
-                    intent: row.intent.clone(),
-                    tone: row.tone.clone(),
-                    domain: row.domain.clone(),
-                    entity: row.entities.first().cloned(),
-                    dated: row.dated,
-                });
-            }
-            prev_id = Some(id);
-        }
-    }
-}
 
 fn main() {
     let args: Vec<String> = std::env::args().collect();
@@ -172,7 +118,7 @@ fn main() {
     let v2_data = fs::read_to_string("data/v2_graph_edges.json").expect("data/v2_graph_edges.json missing — run python/v2_ingest.py first");
     let v2_rows: Vec<V2JsonData> = serde_json::from_str(&v2_data).expect("v2_graph_edges.json format error");
     let v2_count = v2_rows.len();
-    ingest_rows(&mut graph, v2_rows);
+    ingest_v2_rows(&mut graph, v2_rows);
 
     // Merge V3 when available (CLI mode benefits from the wider corpus).
     let v3_path = "data/v3_graph_edges.json";
@@ -183,7 +129,7 @@ fn main() {
         match result {
             Ok(v3_rows) => {
                 let count = v3_rows.len();
-                ingest_rows(&mut graph, v3_rows);
+                ingest_v2_rows(&mut graph, v3_rows);
                 Some(count)
             }
             Err(e) => {
@@ -218,6 +164,15 @@ fn main() {
         println!("  Entity : {}", entity);
         println!("  Year   : {:?}", year);
 
+        // Guardrail 6: Arithmetic / logic interception — abort before classification
+        // if the query contains both a numeric token and an arithmetic signal.
+        if is_arithmetic_query(query) {
+            println!("\n  [GUARDRAIL_6]: Arithmetic/logic query detected.");
+            println!("  -> [BOT_OUTPUT]: System Fault: Graph walk cannot evaluate mathematical expressions — structural abort.");
+            println!("\n=============================================\n");
+            return;
+        }
+
         // Attempt live ML classification; fall back to user-supplied domain + safe defaults.
         println!("\n  [CLASSIFIER]: Running centroid-based intent/tone/domain classification...");
         let (intent, tone, effective_domain) = match classify_query(query) {
@@ -237,6 +192,20 @@ fn main() {
         let mut reasoning = ReasoningModule::new(&graph);
         reasoning.update_context(&intent, &tone, &effective_domain, &[entity.clone()]);
         let config = WalkConfig { target_year: year, depth_limit: depth };
+
+        // Multi-signal reachability guard: abort before generation if a secondary
+        // graph-resident entity in the query is not topologically reachable from
+        // the primary entity — prevents structural hallucination.
+        if let Some(secondary) = secondary_signal(query, entity, &graph) {
+            println!("\n  [SYS_ORCHESTRATOR]: Secondary prompt signal detected -> '{}'.", secondary);
+            println!("  [SYS_ORCHESTRATOR]: BFS reachability trace from [{}] to [{}] (max 10 hops)...", entity, secondary);
+            if !is_reachable(entity, secondary, &graph, 10) {
+                println!("  -> [BOT_OUTPUT]: System Fault: [{}] is not topologically reachable from [{}]. Structural Abort to prevent hallucination!", secondary, entity);
+                println!("\n=============================================\n");
+                return;
+            }
+        }
+
         let graph_fact = generate_dynamic_answer(query, entity, &graph, Some(&spatial), &mut reasoning, &config);
 
         // Attempt stylistic reformatting via miniLLM wrapper; fall back to raw graph fact.
@@ -273,18 +242,30 @@ fn main() {
     let ans3 = generate_dynamic_answer("When does the bank close?", "bank", &graph, None, &mut reasoning, &conf3);
     println!("  -> [BOT_OUTPUT]: \"{}\"", ans3);
     
-    println!("\n[USER_QUERY]: \"Is there an ATM there?\"");
+    let query4 = "Is there an ATM there?";
+    println!("\n[USER_QUERY]: \"{}\"", query4);
     reasoning.update_context("statement", "neutral", "finance", &["Pronoun".to_string()]);
     let conf4 = WalkConfig { target_year: None, depth_limit: 1 };
-    
-    // Multi-Signal validation: context entity is "bank" (from stack); secondary signal is "ATM".
-    // BFS reachability check: is "ATM" reachable from "bank" within the graph topology?
-    println!("  [SYS_ORCHESTRATOR]: Secondary prompt signal detected -> 'ATM'.");
-    println!("  [SYS_ORCHESTRATOR]: BFS reachability trace from [bank] to [ATM] (max 10 hops)...");
-    if !is_reachable("bank", "ATM", &graph, 10) {
-        println!("  -> [BOT_OUTPUT]: System Fault: [ATM] is not topologically reachable from [bank]. Structural Abort to prevent hallucination!");
+
+    // Multi-Signal validation: resolve primary entity from stack, then scan query
+    // for a secondary graph-resident signal and perform BFS reachability check.
+    let primary4 = reasoning.session.entity_stack
+        .iter().rev()
+        .find(|e| e.as_str() != "Pronoun")
+        .map(String::as_str)
+        .unwrap_or("?");
+
+    if let Some(secondary) = secondary_signal(query4, primary4, &graph) {
+        println!("  [SYS_ORCHESTRATOR]: Secondary prompt signal detected -> '{}'.", secondary);
+        println!("  [SYS_ORCHESTRATOR]: BFS reachability trace from [{}] to [{}] (max 10 hops)...", primary4, secondary);
+        if !is_reachable(primary4, secondary, &graph, 10) {
+            println!("  -> [BOT_OUTPUT]: System Fault: [{}] is not topologically reachable from [{}]. Structural Abort to prevent hallucination!", secondary, primary4);
+        } else {
+            let ans4 = generate_dynamic_answer(query4, "Pronoun", &graph, None, &mut reasoning, &conf4);
+            println!("  -> [BOT_OUTPUT]: \"{}\"", ans4);
+        }
     } else {
-        let ans4 = generate_dynamic_answer("Is there an ATM there?", "Pronoun", &graph, None, &mut reasoning, &conf4);
+        let ans4 = generate_dynamic_answer(query4, "Pronoun", &graph, None, &mut reasoning, &conf4);
         println!("  -> [BOT_OUTPUT]: \"{}\"", ans4);
     }
 

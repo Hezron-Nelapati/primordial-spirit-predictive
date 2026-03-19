@@ -1,7 +1,7 @@
 use spse_predictive::graph::{WordGraph, WordNode, WordEdge};
 use spse_predictive::reasoning::ReasoningModule;
 use spse_predictive::spatial::SpatialGrid;
-use spse_predictive::walk::{compute_depth_limit, is_reachable, predict_next, resolve_start_node, WalkConfig};
+use spse_predictive::walk::{compute_depth_limit, is_arithmetic_query, is_reachable, predict_next, resolve_start_node, secondary_signal, WalkConfig};
 
 // ---------------------------------------------------------------------------
 // Graph construction helpers
@@ -638,4 +638,199 @@ fn test_resolve_start_node_prefers_temporally_close_source() {
         Some("new_start"),
         "with target_year=2026 the 2026-dated incoming edge should win"
     );
+}
+
+// ---------------------------------------------------------------------------
+// secondary_signal
+// ---------------------------------------------------------------------------
+
+/// A secondary entity word present in the graph should be detected and returned.
+#[test]
+fn test_secondary_signal_finds_graph_word() {
+    let graph = build_chain(&["bank", "ATM", "open"], "statement", "neutral", "finance", None, None);
+    let result = secondary_signal("Is there an ATM there?", "bank", &graph);
+    assert_eq!(result, Some("ATM"));
+}
+
+/// The primary entity itself must never be returned as the secondary signal,
+/// even if it appears in the query.
+#[test]
+fn test_secondary_signal_ignores_primary_entity() {
+    let graph = build_chain(&["server", "status", "ok"], "statement", "neutral", "tech", None, None);
+    // "server" is the primary — secondary_signal must skip it and return "status".
+    let result = secondary_signal("server status ok", "server", &graph);
+    assert_eq!(result, Some("status"));
+}
+
+/// Punctuation attached to a token should be stripped before graph lookup.
+#[test]
+fn test_secondary_signal_strips_trailing_punctuation() {
+    let graph = build_chain(&["bank", "ATM"], "statement", "neutral", "finance", None, None);
+    let result = secondary_signal("Check ATM!", "bank", &graph);
+    assert_eq!(result, Some("ATM"));
+}
+
+/// Case-insensitive lookup: an uppercase query word must match a graph node
+/// stored in lowercase via the to_lowercase() fallback path.
+#[test]
+fn test_secondary_signal_case_insensitive_lookup() {
+    // Graph stores "atm" (lowercase); query contains "ATM" (uppercase).
+    // secondary_signal tries exact match ("ATM" → miss) then lowercase ("atm" → hit).
+    let graph = build_chain(&["bank", "atm"], "statement", "neutral", "finance", None, None);
+    let result = secondary_signal("Is the ATM open?", "bank", &graph);
+    assert!(result.is_some(), "uppercase query token should match lowercase graph surface");
+}
+
+/// When no word in the query (besides the primary entity) exists in the graph,
+/// secondary_signal must return None.
+#[test]
+fn test_secondary_signal_returns_none_when_no_match() {
+    let graph = build_chain(&["bank", "loan"], "statement", "neutral", "finance", None, None);
+    let result = secondary_signal("xyz abc def", "bank", &graph);
+    assert_eq!(result, None);
+}
+
+// ---------------------------------------------------------------------------
+// is_arithmetic_query  (Guardrail 6)
+// ---------------------------------------------------------------------------
+
+/// Classic arithmetic expression: number + operator keyword → true.
+#[test]
+fn test_is_arithmetic_query_detects_number_plus_keyword() {
+    assert!(is_arithmetic_query("What is 2 plus 3?"));
+}
+
+/// Operator symbol alongside a number → true.
+#[test]
+fn test_is_arithmetic_query_detects_operator_symbol() {
+    assert!(is_arithmetic_query("5 * 7 equals what?"));
+}
+
+/// Number present but no arithmetic signal → false (no false positive).
+#[test]
+fn test_is_arithmetic_query_number_only_returns_false() {
+    assert!(!is_arithmetic_query("The bank closes at 5 pm"));
+}
+
+/// Arithmetic keyword present but no numeric token → false.
+#[test]
+fn test_is_arithmetic_query_keyword_only_returns_false() {
+    assert!(!is_arithmetic_query("What is the sum of all loans?"));
+}
+
+/// Completely non-arithmetic query → false.
+#[test]
+fn test_is_arithmetic_query_normal_query_returns_false() {
+    assert!(!is_arithmetic_query("Are the servers online?"));
+}
+
+/// "squared" keyword with a number triggers the guard.
+#[test]
+fn test_is_arithmetic_query_detects_squared_keyword() {
+    assert!(is_arithmetic_query("What is 9 squared?"));
+}
+
+/// Division via keyword: "divided" + number → true.
+#[test]
+fn test_is_arithmetic_query_detects_divided_keyword() {
+    assert!(is_arithmetic_query("10 divided by 2 is what?"));
+}
+
+// ---------------------------------------------------------------------------
+// Tier 3: backtrack-and-reroute
+// ---------------------------------------------------------------------------
+
+/// Build a fork graph:  anchor → dead_end  (no further outgoing from dead_end)
+///                      anchor → alt
+/// Walking from dead_end with no spatial grid must trigger Tier 3, backtrack
+/// to anchor, and return "alt" via the alternative forward edge.
+#[test]
+fn test_predict_next_tier3_reroutes_via_ancestor() {
+    let mut graph = WordGraph::new();
+
+    for tok in &["anchor", "dead_end", "alt"] {
+        let id = WordGraph::generate_id(tok);
+        graph.by_surface.insert(tok.to_string(), id);
+        graph.nodes.entry(id).or_insert(WordNode {
+            id,
+            surface: tok.to_string(),
+            frequency: 1,
+            position: [0.0; 3],
+            lexical_vector: WordNode::compute_lexical_vector(tok),
+        });
+    }
+
+    let anchor_id   = WordGraph::generate_id("anchor");
+    let dead_end_id = WordGraph::generate_id("dead_end");
+    let alt_id      = WordGraph::generate_id("alt");
+
+    // anchor → dead_end
+    graph.edges.push(WordEdge {
+        from: anchor_id, to: dead_end_id, weight: 1.0,
+        intent: "statement".to_string(), tone: "neutral".to_string(),
+        domain: "general".to_string(), entity: None, dated: None,
+    });
+    // anchor → alt  (the reroute target)
+    graph.edges.push(WordEdge {
+        from: anchor_id, to: alt_id, weight: 1.0,
+        intent: "statement".to_string(), tone: "neutral".to_string(),
+        domain: "general".to_string(), entity: None, dated: None,
+    });
+
+    let reasoning = reasoning_with(&graph, "statement", "neutral", "general");
+    let config = WalkConfig { target_year: None, depth_limit: 1 };
+
+    // dead_end has no outgoing edges — Tier 1 and Tier 2 (None) fail → Tier 3 fires.
+    let result = predict_next("dead_end", &graph, None, &reasoning, &config);
+    assert_eq!(result, Some("alt"), "Tier 3 should reroute via ancestor anchor to alt");
+}
+
+/// Tier 3 must NOT return the dead-end node itself (no trivial back-and-forth loop).
+#[test]
+fn test_predict_next_tier3_does_not_loop_back_to_dead_end() {
+    let mut graph = WordGraph::new();
+
+    for tok in &["src", "dead_end", "forward"] {
+        let id = WordGraph::generate_id(tok);
+        graph.by_surface.insert(tok.to_string(), id);
+        graph.nodes.entry(id).or_insert(WordNode {
+            id,
+            surface: tok.to_string(),
+            frequency: 1,
+            position: [0.0; 3],
+            lexical_vector: WordNode::compute_lexical_vector(tok),
+        });
+    }
+
+    let src_id      = WordGraph::generate_id("src");
+    let dead_end_id = WordGraph::generate_id("dead_end");
+    let forward_id  = WordGraph::generate_id("forward");
+
+    graph.edges.push(WordEdge {
+        from: src_id, to: dead_end_id, weight: 2.0, // heavier — must still be excluded
+        intent: "statement".to_string(), tone: "neutral".to_string(),
+        domain: "general".to_string(), entity: None, dated: None,
+    });
+    graph.edges.push(WordEdge {
+        from: src_id, to: forward_id, weight: 1.0,
+        intent: "statement".to_string(), tone: "neutral".to_string(),
+        domain: "general".to_string(), entity: None, dated: None,
+    });
+
+    let reasoning = reasoning_with(&graph, "statement", "neutral", "general");
+    let config = WalkConfig { target_year: None, depth_limit: 1 };
+
+    let result = predict_next("dead_end", &graph, None, &reasoning, &config);
+    assert_ne!(result, Some("dead_end"), "Tier 3 must not loop back to the dead-end node");
+    assert_eq!(result, Some("forward"));
+}
+
+/// When a dead-end has no ancestors either, Tier 3 returns None (no infinite search).
+#[test]
+fn test_predict_next_tier3_returns_none_when_no_ancestors() {
+    let graph = build_chain(&["orphan"], "statement", "neutral", "general", None, None);
+    let reasoning = reasoning_with(&graph, "statement", "neutral", "general");
+    let config = WalkConfig { target_year: None, depth_limit: 1 };
+    let result = predict_next("orphan", &graph, None, &reasoning, &config);
+    assert_eq!(result, None, "orphan node with no ancestors should return None");
 }

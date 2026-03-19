@@ -1,4 +1,89 @@
 use crate::graph::{WordGraph, WordNode, WordEdge};
+use serde::Deserialize;
+
+// ---------------------------------------------------------------------------
+// V2 JSON corpus schema
+// ---------------------------------------------------------------------------
+
+/// Deserialisation target for a single row in `data/v2_graph_edges.json`
+/// (and `data/v3_graph_edges.json`, which shares the same schema).
+#[derive(Deserialize, Debug)]
+pub struct V2JsonData {
+    pub text:     String,
+    pub tokens:   Vec<String>,
+    pub intent:   String,
+    pub tone:     String,
+    pub domain:   String,
+    pub entities: Vec<String>,
+    pub dated:    Option<u16>,
+}
+
+// ---------------------------------------------------------------------------
+// V2 / V3 corpus ingestion
+// ---------------------------------------------------------------------------
+
+/// Ingest a slice of deserialised JSON rows into an existing graph.
+///
+/// Two edges are considered contextually identical when they share the same
+/// `(from, to, intent, domain, dated)` tuple.  Identical edges have their
+/// weight reinforced by 1.0 rather than being duplicated — this ensures that
+/// repeated corpus facts accumulate strength on a single edge rather than
+/// producing a cluster of low-weight duplicates that dilute scoring.
+///
+/// Different intent/domain combinations for the same token pair are preserved
+/// as distinct edges so that multi-signal routing can select among them.
+pub fn ingest_v2_rows(graph: &mut WordGraph, rows: Vec<V2JsonData>) {
+    for row in rows {
+        let mut prev_id: Option<u64> = None;
+        for token in row.tokens {
+            let id = WordGraph::generate_id(&token);
+            graph.by_surface.insert(token.clone(), id);
+
+            let node = graph.nodes.entry(id).or_insert_with(|| {
+                let lv  = WordNode::compute_lexical_vector(&token);
+                let len = lv[0];
+                let pos = [
+                    len,
+                    if len > 0.0 { lv[3] / len } else { 0.0 }, // vowel density
+                    if len > 0.0 { lv[4] / len } else { 0.0 }, // uniqueness density
+                ];
+                WordNode {
+                    id,
+                    surface: token.clone(),
+                    frequency: 0,
+                    position: pos,
+                    lexical_vector: lv,
+                }
+            });
+            node.frequency += 1;
+
+            if let Some(prev) = prev_id {
+                let existing = graph.edges.iter_mut().find(|e| {
+                    e.from == prev
+                        && e.to == id
+                        && e.intent == row.intent
+                        && e.domain == row.domain
+                        && e.dated  == row.dated
+                });
+                if let Some(edge) = existing {
+                    edge.weight += 1.0;
+                } else {
+                    graph.edges.push(WordEdge {
+                        from: prev,
+                        to: id,
+                        weight: 1.0,
+                        intent: row.intent.clone(),
+                        tone:   row.tone.clone(),
+                        domain: row.domain.clone(),
+                        entity: row.entities.first().cloned(),
+                        dated:  row.dated,
+                    });
+                }
+            }
+            prev_id = Some(id);
+        }
+    }
+}
 
 /// Ingest every non-empty line of `text` as an independent sentence.
 pub fn ingest_text(graph: &mut WordGraph, text: &str, base_weight: f32) {

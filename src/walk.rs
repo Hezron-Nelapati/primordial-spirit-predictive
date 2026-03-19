@@ -68,6 +68,25 @@ pub fn predict_next<'a>(
         }
     }
 
+    // Tier 3: Backtrack-and-reroute.
+    // Find ancestor nodes (nodes with edges pointing to current_id), then collect
+    // their *other* outgoing edges (not back to current_id) and score them.
+    // This escapes dead-ends that Tier 1 and Tier 2 could not resolve.
+    let ancestor_ids: HashSet<u64> = graph.edges.iter()
+        .filter(|e| e.to == current_id)
+        .map(|e| e.from)
+        .collect();
+
+    let tier3_edges: Vec<&WordEdge> = graph.edges.iter()
+        .filter(|e| ancestor_ids.contains(&e.from) && e.to != current_id)
+        .collect();
+
+    if !tier3_edges.is_empty() {
+        println!("    [TIER_3] No Tier-2 candidates — backtrack-reroute found {} alternate path(s) from {} ancestor(s).",
+            tier3_edges.len(), ancestor_ids.len());
+        return score_edges(&tier3_edges, graph, active_intent, active_domain, active_tone, active_entity, config);
+    }
+
     None
 }
 
@@ -179,6 +198,64 @@ pub fn resolve_start_node<'a>(
     }
 
     graph.nodes.get(&current_id).map(|n| n.surface.as_str())
+}
+
+/// Guardrail 6: Arithmetic / logic interception.
+///
+/// Returns `true` when the query contains **both**:
+///   1. At least one standalone numeric token (parses as a finite `f64`), and
+///   2. At least one arithmetic signal — an explicit operator token (`+`, `*`,
+///      `/`, `=`, `%`, `^`) or a keyword (`plus`, `minus`, `times`, `divided`,
+///      `equals`, `sum`, `product`, `percent`, `sqrt`, `squared`, `cubed`).
+///
+/// The two-condition gate avoids false positives on queries like
+/// "The bank closes at 5 pm" (number present but no arithmetic signal) or
+/// "What is the sum of all loans?" (arithmetic word present but no number).
+pub fn is_arithmetic_query(query: &str) -> bool {
+    const ARITH_WORDS: &[&str] = &[
+        "plus", "minus", "times", "divided", "equals", "sum",
+        "product", "percent", "sqrt", "squared", "cubed",
+    ];
+    const ARITH_OPS: &[&str] = &["+", "*", "/", "=", "%", "^"];
+
+    let mut has_number   = false;
+    let mut has_arith    = false;
+
+    for raw in query.split_whitespace() {
+        let token = raw.trim_matches(|c: char| c.is_ascii_punctuation());
+        if token.is_empty() { continue; }
+
+        if !has_number && token.parse::<f64>().map(|v| v.is_finite()).unwrap_or(false) {
+            has_number = true;
+        }
+        if !has_arith {
+            let lower = token.to_lowercase();
+            if ARITH_WORDS.contains(&lower.as_str()) || ARITH_OPS.contains(&token) {
+                has_arith = true;
+            }
+        }
+        if has_number && has_arith { return true; }
+    }
+    false
+}
+
+/// Scan `query` for a secondary entity signal: the first whitespace token that
+/// exists in the graph and is not the `primary_entity`.  Punctuation is
+/// stripped from both ends of each token before lookup.  Both the raw-case
+/// and lowercase forms are tried.  Returns the graph surface form on success.
+pub fn secondary_signal<'a>(query: &str, primary_entity: &str, graph: &'a WordGraph) -> Option<&'a str> {
+    for raw in query.split_whitespace() {
+        let token = raw.trim_matches(|c: char| c.is_ascii_punctuation());
+        if token.is_empty() || token.eq_ignore_ascii_case(primary_entity) {
+            continue;
+        }
+        let id = graph.by_surface.get(token)
+            .or_else(|| graph.by_surface.get(&token.to_lowercase()));
+        if let Some(&node_id) = id {
+            return graph.nodes.get(&node_id).map(|n| n.surface.as_str());
+        }
+    }
+    None
 }
 
 /// BFS reachability: returns `true` if `to_word` is reachable from `from_word`
