@@ -105,7 +105,7 @@ fn test_predict_next_returns_next_token() {
     let reasoning = reasoning_with(&graph, "statement", "neutral", "tech");
     let config = WalkConfig { target_year: None, depth_limit: 1, mode: WalkMode::Forward };
 
-    let next = predict_next("the", &graph, None, &reasoning, &config);
+    let next = predict_next("the", &graph, None, &reasoning, &config, &[]);
     assert_eq!(next, Some("server"));
 }
 
@@ -116,7 +116,7 @@ fn test_predict_next_returns_none_at_end_of_chain() {
     let config = WalkConfig { target_year: None, depth_limit: 1, mode: WalkMode::Forward };
 
     // "world" has no outgoing edges
-    let next = predict_next("world", &graph, None, &reasoning, &config);
+    let next = predict_next("world", &graph, None, &reasoning, &config, &[]);
     assert!(next.is_none());
 }
 
@@ -161,7 +161,7 @@ fn test_predict_next_intent_bias_selects_correct_branch() {
     let reasoning = reasoning_with(&graph, "statement", "neutral", "finance");
     let config = WalkConfig { target_year: None, depth_limit: 1, mode: WalkMode::Forward };
 
-    let next = predict_next("bank", &graph, None, &reasoning, &config);
+    let next = predict_next("bank", &graph, None, &reasoning, &config, &[]);
     assert_eq!(next, Some("closes"), "intent-biased edge should win");
 }
 
@@ -200,7 +200,7 @@ fn test_predict_next_domain_bias_selects_correct_branch() {
     let reasoning = reasoning_with(&graph, "statement", "neutral", "tech");
     let config = WalkConfig { target_year: None, depth_limit: 1, mode: WalkMode::Forward };
 
-    let next = predict_next("data", &graph, None, &reasoning, &config);
+    let next = predict_next("data", &graph, None, &reasoning, &config, &[]);
     assert_eq!(next, Some("server"), "domain-biased edge should win");
 }
 
@@ -241,7 +241,7 @@ fn test_predict_next_temporal_bias_prefers_closer_year() {
     let reasoning = reasoning_with(&graph, "statement", "neutral", "tech");
     let config = WalkConfig { target_year: Some(2026), depth_limit: 1, mode: WalkMode::Forward };
 
-    let next = predict_next("status", &graph, None, &reasoning, &config);
+    let next = predict_next("status", &graph, None, &reasoning, &config, &[]);
     assert_eq!(next, Some("online"), "temporally closer edge should win");
 }
 
@@ -257,7 +257,7 @@ fn test_predict_next_oov_snaps_to_graph_and_continues() {
     let config = WalkConfig { target_year: None, depth_limit: 1, mode: WalkMode::Forward };
 
     // "srvr" is not in the graph — OOV fallback should snap to nearest node and return Some
-    let result = predict_next("srvr", &graph, None, &reasoning, &config);
+    let result = predict_next("srvr", &graph, None, &reasoning, &config, &[]);
     assert!(result.is_some(), "OOV fallback must return Some, not panic or return None");
 }
 
@@ -411,7 +411,7 @@ fn test_predict_next_tier2_routes_via_nearby_node() {
     let reasoning = reasoning_with(&graph, "statement", "neutral", "general");
     let config = WalkConfig { target_year: None, depth_limit: 1, mode: WalkMode::Forward };
 
-    let next = predict_next("orphan", &graph, Some(&spatial), &reasoning, &config);
+    let next = predict_next("orphan", &graph, Some(&spatial), &reasoning, &config, &[]);
     assert_eq!(next, Some("result"), "Tier 2 should route via anchor's edge to result");
 }
 
@@ -422,8 +422,61 @@ fn test_predict_next_tier2_not_triggered_when_tier1_succeeds() {
     let reasoning = reasoning_with(&graph, "statement", "neutral", "general");
     let config = WalkConfig { target_year: None, depth_limit: 1, mode: WalkMode::Forward };
 
-    let next = predict_next("hello", &graph, Some(&spatial), &reasoning, &config);
+    let next = predict_next("hello", &graph, Some(&spatial), &reasoning, &config, &[]);
     assert_eq!(next, Some("world"), "Tier 1 direct edge should win when it exists");
+}
+
+// Tier 2 with position history: when the centroid of history + current differs
+// from the dead-end alone, Tier 2 should find neighbours via the centroid.
+#[test]
+fn test_predict_next_tier2_centroid_shifts_search_origin() {
+    let mut graph = WordGraph::new();
+
+    let dead_id   = WordGraph::generate_id("dead");
+    let hist_id   = WordGraph::generate_id("hist");
+    let anchor_id = WordGraph::generate_id("anchor");
+    let result_id = WordGraph::generate_id("result");
+
+    // Geometry:
+    //   anchor at origin [0,0,0].
+    //   dead at [6,0,0]  — distance 6 from anchor, OUTSIDE radius 3.0.
+    //   hist at [-4,0,0] — centroid([hist,dead]) = [1,0,0], distance 1 from anchor, INSIDE radius 3.0.
+    let dead_pos:   [f32; 3] = [6.0, 0.0, 0.0];
+    let hist_pos:   [f32; 3] = [-4.0, 0.0, 0.0];
+    let anchor_pos: [f32; 3] = [0.0, 0.0, 0.0];
+
+    for (id, word, pos) in [
+        (dead_id,   "dead",   dead_pos),
+        (hist_id,   "hist",   hist_pos),
+        (anchor_id, "anchor", anchor_pos),
+        (result_id, "result", [0.1_f32, 0.0, 0.0]),
+    ] {
+        graph.by_surface.insert(word.to_string(), id);
+        graph.nodes.insert(id, WordNode {
+            id, surface: word.to_string(), frequency: 1,
+            position: pos,
+            lexical_vector: WordNode::compute_lexical_vector(word),
+        });
+    }
+    graph.edges.push(WordEdge {
+        from: anchor_id, to: result_id, weight: 1.0,
+        intent: "statement".to_string(), tone: "neutral".to_string(),
+        domain: "general".to_string(), entity: None, dated: None,
+    });
+
+    let spatial = SpatialGrid::build(graph.nodes.values().map(|n| (n.id, n.position)));
+    let reasoning = reasoning_with(&graph, "statement", "neutral", "general");
+    let config = WalkConfig { target_year: None, depth_limit: 1, mode: WalkMode::Forward };
+
+    // Without history: search from dead_pos [6,0,0] — distance 6 from anchor, outside radius 3.0.
+    let without_history = predict_next("dead", &graph, Some(&spatial), &reasoning, &config, &[]);
+    // With history [hist_pos = [-4,0,0]]: centroid = [(-4+6)/2, 0, 0] = [1,0,0]
+    // — distance 1 from anchor, inside radius 3.0 → finds anchor→result.
+    let with_history = predict_next("dead", &graph, Some(&spatial), &reasoning, &config, &[hist_pos]);
+    assert_eq!(with_history, Some("result"),
+        "Tier 2 centroid with history should find anchor→result");
+    assert_ne!(without_history, Some("result"),
+        "Tier 2 without history should not find anchor from dead_pos (distance 6 > radius 3)");
 }
 
 // ---------------------------------------------------------------------------
@@ -877,7 +930,7 @@ fn test_predict_next_tier3_reroutes_via_ancestor() {
     let config = WalkConfig { target_year: None, depth_limit: 1, mode: WalkMode::Forward };
 
     // dead_end has no outgoing edges — Tier 1 and Tier 2 (None) fail → Tier 3 fires.
-    let result = predict_next("dead_end", &graph, None, &reasoning, &config);
+    let result = predict_next("dead_end", &graph, None, &reasoning, &config, &[]);
     assert_eq!(result, Some("alt"), "Tier 3 should reroute via ancestor anchor to alt");
 }
 
@@ -916,7 +969,7 @@ fn test_predict_next_tier3_does_not_loop_back_to_dead_end() {
     let reasoning = reasoning_with(&graph, "statement", "neutral", "general");
     let config = WalkConfig { target_year: None, depth_limit: 1, mode: WalkMode::Forward };
 
-    let result = predict_next("dead_end", &graph, None, &reasoning, &config);
+    let result = predict_next("dead_end", &graph, None, &reasoning, &config, &[]);
     assert_ne!(result, Some("dead_end"), "Tier 3 must not loop back to the dead-end node");
     assert_eq!(result, Some("forward"));
 }
@@ -927,7 +980,7 @@ fn test_predict_next_tier3_returns_none_when_no_ancestors() {
     let graph = build_chain(&["orphan"], "statement", "neutral", "general", None, None);
     let reasoning = reasoning_with(&graph, "statement", "neutral", "general");
     let config = WalkConfig { target_year: None, depth_limit: 1, mode: WalkMode::Forward };
-    let result = predict_next("orphan", &graph, None, &reasoning, &config);
+    let result = predict_next("orphan", &graph, None, &reasoning, &config, &[]);
     assert_eq!(result, None, "orphan node with no ancestors should return None");
 }
 
@@ -1030,7 +1083,7 @@ fn test_predict_next_explain_mode_prefers_high_out_degree() {
     let reasoning = reasoning_with(&graph, "explain", "neutral", "science");
     let config = WalkConfig { target_year: None, depth_limit: 2, mode: WalkMode::Explain };
 
-    let result = predict_next("src", &graph, None, &reasoning, &config);
+    let result = predict_next("src", &graph, None, &reasoning, &config, &[]);
     assert_eq!(result, Some("hub"), "Explain mode must prefer hub (3 onward edges) over leaf (0 edges)");
 }
 
@@ -1081,7 +1134,7 @@ fn test_predict_next_question_mode_routes_toward_entity_anchor() {
     reasoning.update_context("question", "neutral", "general", &["answer".to_string()]);
     let config = WalkConfig { target_year: None, depth_limit: 1, mode: WalkMode::Question };
 
-    let result = predict_next("src", &graph, None, &reasoning, &config);
+    let result = predict_next("src", &graph, None, &reasoning, &config, &[]);
     assert_eq!(result, Some("near"), "Question mode must route toward the entity anchor");
 }
 

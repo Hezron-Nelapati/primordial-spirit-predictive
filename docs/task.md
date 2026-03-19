@@ -60,6 +60,8 @@ All six modules: `graph`, `reasoning`, `walk`, `classify`, `spatial`, `ingest`.
 - `sanitize_queue()` — Guardrail 3, called inside `generate_dynamic_answer()` before every walk.
 - `update_context()` — pushes to all four stacks; skips "Pronoun" entity entries.
 - `reset_session()` — clears all four stacks; used between independent conversations.
+- `is_arithmetic_query()` — Guardrail 6; two-condition gate (numeric token + arithmetic signal). Moved here from `walk.rs` (Phase 12 refactor).
+- `evaluate_arithmetic()` — native Rust evaluator; binary/unary/fold ops; returns bare result string for miniLLM styling. Moved here from `walk.rs` (Phase 12 refactor).
 - Status: **Complete and fully wired**.
 
 ### `src/walk.rs`
@@ -68,9 +70,8 @@ All six modules: `graph`, `reasoning`, `walk`, `classify`, `spatial`, `ingest`.
 - `is_reachable()` — BFS reachability with `max_hops` bound; used by multi-signal guard.
 - `compute_depth_limit()` — 2-hop topology count → dynamic sentence depth (1–4).
 - `secondary_signal()` — scans query tokens for a secondary graph-resident entity signal.
-- `is_arithmetic_query()` — Guardrail 6; two-condition gate (numeric token + arithmetic signal).
-- `evaluate_arithmetic()` — Phase 12; native Rust arithmetic evaluator; binary ops (`+`,`-`,`*`,`/`,`%`), unary ops (`sqrt`, `squared`, `cubed`), fold ops (`sum`, `product`); division-by-zero and negative-sqrt handled.
-- Status: **All three tiers implemented and wired. All guardrails active. Arithmetic computed natively.**
+- **Tier 2 geometric centroid** (Phase 13): `predict_next` accepts `pos_history: &[[f32; 3]]`; Tier 2 KD-tree search origin is the average of history + current position when history non-empty; falls back to current node position for empty history. Rolling window of 5 positions maintained in `generate_dynamic_answer`.
+- Status: **All three tiers implemented and wired. All guardrails active. Arithmetic in reasoning.rs. Tier 2 uses geometric centroid.**
 
 ### `src/classify.rs`
 - `Classifier::load(path)`, `Classifier::intent(emb_full, emb_pos)`, `Classifier::tone(...)`, `Classifier::domain(...)`.
@@ -220,7 +221,7 @@ Status: **Resolved — V1 surface rewritten or removed**
 - [x] `tests/walk_tests.rs` — 55 tests (walk routing, guardrails, spatial, Tier 1/2/3, secondary-signal, arithmetic-guard, reset_session, WalkMode)
 - [x] `tests/ingest_tests.rs` — 18 tests (sentence/text ingest, edge reinforcement, `ingest_v2_rows`, node position population)
 - [x] `tests/classify_tests.rs` — 6 tests (centroid load, intent/tone labels, determinism)
-- [x] `cargo test` passes (97/97 across all suites, zero warnings)
+- [x] `cargo test` passes (98/98 across all suites, zero warnings)
 
 ### Phase 5: Architecture Docs and Guardrail Design
 Status: **All guardrails and all three routing tiers implemented and wired**
@@ -340,6 +341,6 @@ The `implementation_plan.md` specifies a Sentence Queue to prevent embedding qua
 - **Working path**: `python/v2_ingest.py` → `data/v2_graph_edges.json` → `cargo run`
 - **`cargo run`**: passes — 5 demo scenarios, zero warnings
 - **`cargo run -- "query" entity domain [year]`**: passes — classifier and LLM bridge both degrade gracefully when Python packages absent
-- **`cargo test`**: 97/97 pass across all suites (70 walk + 18 ingest + 9 classify), zero warnings
+- **`cargo test`**: 98/98 pass across all suites (71 walk + 18 ingest + 9 classify), zero warnings
 - **V3/RAG**: Rust load path ready; Python scripts ready; only data generation step missing
 - **Full pipeline** (when packages installed): `classify_query.py` → intent/tone/domain → `walk.rs` Tier 1 → `minillm_wrapper.py` → styled response

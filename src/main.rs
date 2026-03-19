@@ -93,9 +93,19 @@ fn generate_dynamic_answer(
     let mut output = start_node.to_string();
     let mut current = start_node.to_string();
     let mut sentence_count = 0;
+    // Rolling position window (last 5 visited nodes) for Tier 2 centroid search.
+    const POS_WINDOW: usize = 5;
+    let mut pos_history: Vec<[f32; 3]> = Vec::with_capacity(POS_WINDOW);
 
     for _ in 0..50 {
-        if let Some(next_word) = predict_next(&current, graph, spatial, reasoning, config) {
+        if let Some(next_word) = predict_next(&current, graph, spatial, reasoning, config, &pos_history) {
+            // Record position of current node before advancing.
+            if let Some(id) = graph.by_surface.get(&current) {
+                if let Some(node) = graph.nodes.get(id) {
+                    pos_history.push(node.position);
+                    if pos_history.len() > POS_WINDOW { pos_history.remove(0); }
+                }
+            }
             if next_word == "." || next_word == "?" || next_word == "!" {
                 output.push_str(next_word);
                 sentence_count += 1;

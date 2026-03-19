@@ -40,6 +40,7 @@ pub fn predict_next<'a>(
     spatial: Option<&SpatialGrid>,
     reasoning: &ReasoningModule,
     config: &WalkConfig,
+    pos_history: &[[f32; 3]],
 ) -> Option<&'a str> {
     let current_id = match graph.by_surface.get(current_word) {
         Some(id) => *id,
@@ -83,16 +84,31 @@ pub fn predict_next<'a>(
     }
 
     // Tier 2: KD-tree radial search when no direct edges exist.
+    // Search origin: geometric centroid of last N traversed positions when history
+    // is available (addresses Context Amnesia §2 of architecture_ideas.md); falls
+    // back to current node position for an empty history.
     if let Some(grid) = spatial {
-        let pos = graph.nodes.get(&current_id).map(|n| n.position).unwrap_or([0.0; 3]);
-        let neighbours = grid.query_radius(pos, 3.0);
+        let current_pos = graph.nodes.get(&current_id).map(|n| n.position).unwrap_or([0.0; 3]);
+        let search_pos = if pos_history.is_empty() {
+            current_pos
+        } else {
+            let all: Vec<[f32; 3]> = pos_history.iter().copied().chain(std::iter::once(current_pos)).collect();
+            let n = all.len() as f32;
+            [
+                all.iter().map(|p| p[0]).sum::<f32>() / n,
+                all.iter().map(|p| p[1]).sum::<f32>() / n,
+                all.iter().map(|p| p[2]).sum::<f32>() / n,
+            ]
+        };
+
+        let neighbours = grid.query_radius(search_pos, 3.0);
         // Collect outgoing edges from all nearby nodes (excluding the current node itself).
         let tier2_edges: Vec<&WordEdge> = graph.edges.iter()
             .filter(|e| e.from != current_id && neighbours.contains(&e.from))
             .collect();
 
         if !tier2_edges.is_empty() {
-            println!("    [TIER_2] No direct edges — radial KD-tree search found {} candidate edges from {} neighbours.",
+            println!("    [TIER_2] No direct edges — centroid radial search found {} candidate edges from {} neighbours.",
                 tier2_edges.len(), neighbours.len());
             return score_edges(&tier2_edges, graph, active_intent, active_domain, active_tone, active_entity, config);
         }
