@@ -1,6 +1,9 @@
 /target
-data/graph.db
+data/graph.*
+data/v2_corpus_reinforced.json
+data/centroids.json
 __pycache__/
 *.pyc
 .env
 .flask_secret
+.claude
