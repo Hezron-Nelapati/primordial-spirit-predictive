@@ -84,7 +84,7 @@ def load_corpus(path):
         return []
     with open(path, encoding="utf-8") as f:
         rows = json.load(f)
-    print(f"  Loaded {len(rows)} sentences from {path}")
+    print(f"  Loaded {len(rows)} sentences from {path}", flush=True)
     return rows
 
 
@@ -109,7 +109,7 @@ def load_corpus_txt(path):
         for sent in sentences:
             intent, tone, domain = mock_classify(sent)
             rows.append({"text": sent, "intent": intent, "tone": tone, "domain": domain})
-    print(f"  Loaded {len(rows)} sentences from {path} (mock_classify labels)")
+    print(f"  Loaded {len(rows)} sentences from {path} (mock_classify labels)", flush=True)
     return rows
 
 
@@ -170,7 +170,7 @@ def main():
         nltk.download("punkt_tab", quiet=True)
 
     from gpu_utils import get_device
-    print("Loading sentence-transformer model...")
+    print("Loading sentence-transformer model...", flush=True)
     model = SentenceTransformer("all-MiniLM-L6-v2", device=get_device())
 
     # -----------------------------------------------------------------------
@@ -187,17 +187,17 @@ def main():
 
     if os.path.exists(reinforced):
         corpus_rows = load_corpus(reinforced)
-        print(f"  Mode: FULL (reinforced) — {len(corpus_rows)} sentences")
+        print(f"  Mode: FULL (reinforced) — {len(corpus_rows)} sentences", flush=True)
     elif os.path.exists(labelled):
         corpus_rows = load_corpus(labelled)
-        print(f"  Mode: FULL — {len(corpus_rows)} sentences")
+        print(f"  Mode: FULL — {len(corpus_rows)} sentences", flush=True)
     elif os.path.exists(raw_txt):
         corpus_rows = load_corpus_txt(raw_txt)
-        print(f"  Mode: BOOTSTRAP (corpus.txt) — {len(corpus_rows)} sentences with mock labels")
-        print("  (ingest will retrain centroids from real labels after this run)")
+        print(f"  Mode: BOOTSTRAP (corpus.txt) — {len(corpus_rows)} sentences with mock labels", flush=True)
+        print("  (ingest will retrain centroids from real labels after this run)", flush=True)
     else:
         corpus_rows = []
-        print("  Mode: SEED ONLY — no corpus found, training from bootstrap examples only")
+        print("  Mode: SEED ONLY — no corpus found, training from bootstrap examples only", flush=True)
 
     # -----------------------------------------------------------------------
     # Build training sets
@@ -253,7 +253,7 @@ def main():
     # -----------------------------------------------------------------------
     # POS-filtered texts for blended centroid
     # -----------------------------------------------------------------------
-    print("Extracting POS-filtered texts...")
+    print("Extracting POS-filtered texts...", flush=True)
     intent_pos_texts = [pos_filter(t, INTENT_TAGS) for t in intent_texts]
     tone_pos_texts   = [pos_filter(t, TONE_TAGS)   for t in tone_texts]
     domain_pos_texts = [pos_filter(t, DOMAIN_TAGS) for t in domain_texts]
@@ -261,7 +261,7 @@ def main():
     # -----------------------------------------------------------------------
     # Embeddings
     # -----------------------------------------------------------------------
-    print("Computing embeddings (this may take a moment for large corpora)...")
+    print("Computing embeddings (this may take a moment for large corpora)...", flush=True)
     emb_intent_full = model.encode(intent_texts,     batch_size=128, show_progress_bar=True)
     emb_intent_pos  = model.encode(intent_pos_texts, batch_size=128, show_progress_bar=False)
 
@@ -274,7 +274,7 @@ def main():
     # -----------------------------------------------------------------------
     # Fit centroids
     # -----------------------------------------------------------------------
-    print("Fitting centroids...")
+    print("Fitting centroids...", flush=True)
     clf_intent_full = NearestCentroid().fit(emb_intent_full, intent_labels)
     clf_intent_pos  = NearestCentroid().fit(emb_intent_pos,  intent_labels)
 
@@ -302,10 +302,10 @@ def main():
     with open(out_path, "w") as f:
         json.dump(store, f)
 
-    print(f"\nExported to {out_path}")
-    print(f"  Intents : {clf_intent_full.classes_.tolist()}")
-    print(f"  Tones   : {clf_tone_full.classes_.tolist()}")
-    print(f"  Domains : {clf_domain_full.classes_.tolist()}")
+    print(f"\nExported to {out_path}", flush=True)
+    print(f"  Intents : {clf_intent_full.classes_.tolist()}", flush=True)
+    print(f"  Tones   : {clf_tone_full.classes_.tolist()}", flush=True)
+    print(f"  Domains : {clf_domain_full.classes_.tolist()}", flush=True)
 
 
 if __name__ == "__main__":

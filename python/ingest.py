@@ -125,16 +125,16 @@ def main():
         clf_model = SentenceTransformer("all-MiniLM-L6-v2", device=get_device())
         with open("../data/centroids.json") as f:
             clf_store = json.load(f)
-        print("  [INGEST]: Centroid model loaded — using symmetric classification.")
+        print("  [INGEST]: Centroid model loaded — using symmetric classification.", flush=True)
     except Exception as e:
-        print(f"  [INGEST]: Centroid model unavailable ({e}) — falling back to mock_classify().")
+        print(f"  [INGEST]: Centroid model unavailable ({e}) — falling back to mock_classify().", flush=True)
 
     with open('../data/corpus.txt', 'r', encoding='utf-8') as f:
         paragraphs = f.read().split('\n')
 
     processed_data = []
     total_paragraphs = len([p for p in paragraphs if p.strip()])
-    print(f"  [INGEST]: Processing {total_paragraphs} paragraphs …")
+    print(f"  [INGEST]: Processing {total_paragraphs} paragraphs …", flush=True)
 
     for i, para in enumerate(paragraphs):
         if not para.strip():
@@ -168,11 +168,11 @@ def main():
             })
 
         if i % 5000 == 0 and i > 0:
-            print(f"  [INGEST]: Parsed {i}/{total_paragraphs} paragraphs …")
+            print(f"  [INGEST]: Parsed {i}/{total_paragraphs} paragraphs …", flush=True)
 
     with open('../data/corpus_tmp.json', 'w', encoding='utf-8') as f:
         json.dump(processed_data, f, indent=2)
-    print(f"Ingestion complete — {len(processed_data)} sentences exported to data/corpus_tmp.json")
+    print(f"Ingestion complete — {len(processed_data)} sentences exported to data/corpus_tmp.json", flush=True)
 
 
 if __name__ == "__main__":

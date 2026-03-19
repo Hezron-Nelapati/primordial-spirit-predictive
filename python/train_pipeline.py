@@ -50,11 +50,14 @@ def log(tag: str, msg: str) -> None:
 def run_script(script_name: str) -> int:
     """Run a Python script in python/ directory, streaming all output to stdout.
     Uses cwd=PYTHON_DIR so that '../data/' paths inside scripts resolve correctly
-    to the project-root data/ directory."""
-    cmd = [sys.executable, os.path.join(PYTHON_DIR, script_name)]
+    to the project-root data/ directory.
+    -u flag forces unbuffered stdout/stderr so lines appear immediately instead
+    of being held in an 8 KB pipe buffer until the subprocess exits."""
+    cmd = [sys.executable, "-u", os.path.join(PYTHON_DIR, script_name)]
+    env = {**os.environ, "PYTHONUNBUFFERED": "1"}
     proc = subprocess.Popen(
         cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
-        text=True, cwd=PYTHON_DIR,
+        text=True, cwd=PYTHON_DIR, env=env,
     )
     for line in iter(proc.stdout.readline, ""):
         print(line, end="", flush=True)
