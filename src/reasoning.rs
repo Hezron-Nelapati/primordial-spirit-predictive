@@ -1,4 +1,4 @@
-use crate::graph::WordGraph;
+use crate::graph::GraphAccess;
 
 /// Guardrail 6: Arithmetic / logic interception.
 ///
@@ -186,12 +186,12 @@ impl SessionalMemory {
 }
 
 pub struct ReasoningModule<'a> {
-    pub graph: &'a WordGraph,
+    pub graph: &'a dyn GraphAccess,
     pub session: SessionalMemory,
 }
 
 impl<'a> ReasoningModule<'a> {
-    pub fn new(graph: &'a WordGraph) -> Self {
+    pub fn new(graph: &'a dyn GraphAccess) -> Self {
         Self {
             graph,
             session: SessionalMemory::new(),

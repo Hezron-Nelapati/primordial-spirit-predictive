@@ -1,4 +1,4 @@
-use crate::graph::{WordGraph, WordNode, WordEdge};
+use crate::graph::{GraphAccess, WordEdge};
 use crate::reasoning::ReasoningModule;
 use crate::spatial::SpatialGrid;
 use std::collections::{HashSet, VecDeque};
@@ -38,31 +38,31 @@ pub struct WalkConfig {
     pub mode: WalkMode,
 }
 
-pub fn predict_next<'a>(
+pub fn predict_next(
     current_word: &str,
-    graph: &'a WordGraph,
+    graph: &dyn GraphAccess,
     spatial: Option<&SpatialGrid>,
-    reasoning: &ReasoningModule,
+    reasoning: &ReasoningModule<'_>,
     config: &WalkConfig,
     pos_history: &[[f32; 3]],
-) -> Option<&'a str> {
-    let current_id = match graph.by_surface.get(current_word) {
-        Some(id) => *id,
+) -> Option<String> {
+    let current_id = match graph.surface_to_id(current_word) {
+        Some(id) => id,
         None => {
             // Guardrail 1: OOV Lexical Fallback
             println!("🚨 OOV Panic: '{}' not inside spatial memory.", current_word);
             println!("⚡ Triggering 5-Dimensional Lexical Vector Fallback...");
-            let target_vec = WordNode::compute_lexical_vector(current_word);
+            let target_vec = crate::graph::WordNode::compute_lexical_vector(current_word);
             let mut best_dist = f32::MAX;
-            let mut best_id = 0;
-            let mut nearest_str = "";
+            let mut best_id = 0u64;
+            let mut nearest_str = String::new();
 
-            for (id, node) in &graph.nodes {
+            for node in graph.all_nodes() {
                 let dist = euclidean_dist_5(&node.lexical_vector, &target_vec);
                 if dist < best_dist {
                     best_dist = dist;
-                    best_id = *id;
-                    nearest_str = &node.surface;
+                    best_id = node.id;
+                    nearest_str = node.surface.clone();
                 }
             }
             println!("✅ Successfully snapped OOV onto geometric structural neighbor: [{}]", nearest_str);
@@ -76,14 +76,14 @@ pub fn predict_next<'a>(
     let active_entity = reasoning.session.entity_stack.last().map(String::as_str).unwrap_or("");
 
     // Tier 1: Multi-Tag Match Biasing on direct outgoing edges.
-    let edges: Vec<&WordEdge> = graph.edges.iter().filter(|e| e.from == current_id).collect();
+    let edges = graph.edges_from(current_id);
 
     if !edges.is_empty() {
         println!("    [TRACE] Validating {} outgoing pathways geometrically...", edges.len());
         return match config.mode {
-            WalkMode::Explain   => score_edges_explain(&edges, graph),
-            WalkMode::Question  => score_edges_question(&edges, graph, active_entity),
-            WalkMode::Forward   => score_edges(&edges, graph, active_intent, active_domain, active_tone, active_entity, config),
+            WalkMode::Explain  => score_edges_explain(&edges, graph),
+            WalkMode::Question => score_edges_question(&edges, graph, active_entity),
+            WalkMode::Forward  => score_edges(&edges, graph, active_intent, active_domain, active_tone, active_entity, config),
         };
     }
 
@@ -92,7 +92,7 @@ pub fn predict_next<'a>(
     // is available (addresses Context Amnesia §2 of architecture_ideas.md); falls
     // back to current node position for an empty history.
     if let Some(grid) = spatial {
-        let current_pos = graph.nodes.get(&current_id).map(|n| n.position).unwrap_or([0.0; 3]);
+        let current_pos = graph.node_by_id(current_id).map(|n| n.position).unwrap_or([0.0; 3]);
         let search_pos = if pos_history.is_empty() {
             current_pos
         } else {
@@ -106,10 +106,12 @@ pub fn predict_next<'a>(
         };
 
         let neighbours = grid.query_radius(search_pos, 3.0);
-        // Collect outgoing edges from all nearby nodes (excluding the current node itself).
-        let tier2_edges: Vec<&WordEdge> = graph.edges.iter()
-            .filter(|e| e.from != current_id && neighbours.contains(&e.from))
-            .collect();
+        let mut tier2_edges: Vec<WordEdge> = Vec::new();
+        for &nb_id in &neighbours {
+            if nb_id != current_id {
+                tier2_edges.extend(graph.edges_from(nb_id));
+            }
+        }
 
         if !tier2_edges.is_empty() {
             println!("    [TIER_2] No direct edges — centroid radial search found {} candidate edges from {} neighbours.",
@@ -140,14 +142,17 @@ pub fn predict_next<'a>(
     }
 
     // Classic backtrack-reroute (all modes, and Question fallback when bridge fails).
-    let ancestor_ids: HashSet<u64> = graph.edges.iter()
-        .filter(|e| e.to == current_id)
-        .map(|e| e.from)
-        .collect();
+    let ancestor_edges = graph.edges_to(current_id);
+    let ancestor_ids: HashSet<u64> = ancestor_edges.iter().map(|e| e.from).collect();
 
-    let tier3_edges: Vec<&WordEdge> = graph.edges.iter()
-        .filter(|e| ancestor_ids.contains(&e.from) && e.to != current_id)
-        .collect();
+    let mut tier3_edges: Vec<WordEdge> = Vec::new();
+    for anc_id in &ancestor_ids {
+        for e in graph.edges_from(*anc_id) {
+            if e.to != current_id {
+                tier3_edges.push(e);
+            }
+        }
+    }
 
     if !tier3_edges.is_empty() {
         println!("    [TIER_3] No Tier-2 candidates — backtrack-reroute found {} alternate path(s) from {} ancestor(s).",
@@ -161,15 +166,13 @@ pub fn predict_next<'a>(
 /// Explain mode: prefer the target node with the most onward outgoing edges.
 /// Wider topological coverage produces richer explanatory sequences.
 /// Falls back to the first edge if all targets are leaves.
-fn score_edges_explain<'a>(edges: &[&WordEdge], graph: &'a WordGraph) -> Option<&'a str> {
-    let best = edges.iter().max_by_key(|e| {
-        graph.edges.iter().filter(|out| out.from == e.to).count()
-    });
-    best.and_then(|e| graph.nodes.get(&e.to).map(|n| {
-        let out_degree = graph.edges.iter().filter(|out| out.from == e.to).count();
+fn score_edges_explain(edges: &[WordEdge], graph: &dyn GraphAccess) -> Option<String> {
+    let best = edges.iter().max_by_key(|e| graph.edges_from(e.to).len());
+    best.and_then(|e| graph.node_by_id(e.to).map(|n| {
+        let out_degree = graph.edges_from(e.to).len();
         println!("      [EXPLAIN_MODE] Selected node [{}] with {} onward edges (widest coverage).",
-            n.surface.as_str(), out_degree);
-        n.surface.as_str()
+            n.surface, out_degree);
+        n.surface
     }))
 }
 
@@ -177,35 +180,33 @@ fn score_edges_explain<'a>(edges: &[&WordEdge], graph: &'a WordGraph) -> Option<
 /// to the active entity anchor — routes toward a known answer rather than
 /// extending the current chain linearly.
 /// Falls back to the first edge when no entity is set or no path closes.
-fn score_edges_question<'a>(
-    edges: &[&WordEdge],
-    graph: &'a WordGraph,
+fn score_edges_question(
+    edges: &[WordEdge],
+    graph: &dyn GraphAccess,
     active_entity: &str,
-) -> Option<&'a str> {
-    let target_id = match graph.by_surface.get(active_entity) {
-        Some(id) => *id,
+) -> Option<String> {
+    let target_id = match graph.surface_to_id(active_entity) {
+        Some(id) => id,
         None => {
             // No known entity anchor — fall back to first candidate.
-            return edges.first().and_then(|e| graph.nodes.get(&e.to).map(|n| n.surface.as_str()));
+            return edges.first().and_then(|e| graph.node_by_id(e.to).map(|n| n.surface));
         }
     };
 
     // Pick the edge whose target has the shortest forward-hop distance to the entity.
     // Distance is approximated by a bounded BFS (max 5 hops); unreachable = usize::MAX.
-    let best = edges.iter().min_by_key(|e| {
-        bfs_distance(e.to, target_id, graph, 5)
-    });
+    let best = edges.iter().min_by_key(|e| bfs_distance(e.to, target_id, graph, 5));
 
-    best.and_then(|e| graph.nodes.get(&e.to).map(|n| {
+    best.and_then(|e| graph.node_by_id(e.to).map(|n| {
         println!("      [QUESTION_MODE] Selected node [{}] as closest to entity anchor [{}].",
-            n.surface.as_str(), active_entity);
-        n.surface.as_str()
+            n.surface, active_entity);
+        n.surface
     }))
 }
 
 /// BFS hop distance from `from_id` to `to_id`, bounded at `max_hops`.
 /// Returns `usize::MAX` if unreachable within the bound.
-fn bfs_distance(from_id: u64, to_id: u64, graph: &WordGraph, max_hops: usize) -> usize {
+fn bfs_distance(from_id: u64, to_id: u64, graph: &dyn GraphAccess, max_hops: usize) -> usize {
     if from_id == to_id { return 0; }
     let mut visited: HashSet<u64> = HashSet::new();
     let mut queue: VecDeque<(u64, usize)> = VecDeque::new();
@@ -213,7 +214,7 @@ fn bfs_distance(from_id: u64, to_id: u64, graph: &WordGraph, max_hops: usize) ->
     visited.insert(from_id);
     while let Some((node, hops)) = queue.pop_front() {
         if hops >= max_hops { continue; }
-        for edge in graph.edges.iter().filter(|e| e.from == node) {
+        for edge in graph.edges_from(node) {
             if edge.to == to_id { return hops + 1; }
             if visited.insert(edge.to) {
                 queue.push_back((edge.to, hops + 1));
@@ -224,21 +225,21 @@ fn bfs_distance(from_id: u64, to_id: u64, graph: &WordGraph, max_hops: usize) ->
 }
 
 /// Score a candidate edge slice and return the surface of the highest-weighted target node.
-fn score_edges<'a>(
-    edges: &[&WordEdge],
-    graph: &'a WordGraph,
+fn score_edges(
+    edges: &[WordEdge],
+    graph: &dyn GraphAccess,
     active_intent: &str,
     active_domain:  &str,
     active_tone:    &str,
     active_entity:  &str,
     config: &WalkConfig,
-) -> Option<&'a str> {
+) -> Option<String> {
     let mut best_edge   = None;
     let mut highest_weight = 0.0_f32;
 
-    for &edge in edges {
+    for edge in edges {
         let mut adj_weight = edge.weight;
-        let target_surface = graph.nodes.get(&edge.to).map(|n| n.surface.as_str()).unwrap_or("?");
+        let target_surface = graph.node_by_id(edge.to).map(|n| n.surface).unwrap_or_default();
         println!("      └─ Scanning Edge toward: [{}]", target_surface);
 
         if edge.intent == active_intent {
@@ -270,11 +271,11 @@ fn score_edges<'a>(
 
         if adj_weight > highest_weight {
             highest_weight = adj_weight;
-            best_edge = Some(edge);
+            best_edge = Some(edge.clone());
         }
     }
 
-    best_edge.and_then(|e| graph.nodes.get(&e.to).map(|n| n.surface.as_str()))
+    best_edge.and_then(|e| graph.node_by_id(e.to).map(|n| n.surface))
 }
 
 /// Spatial A* bridge for answer-seeking (Question/Complaint) Tier 3.
@@ -289,15 +290,15 @@ fn score_edges<'a>(
 /// - The entity anchor is unknown or not in the graph.
 /// - The nearest node is the current node itself (no progress).
 /// - The bridge node has no outgoing edges (would immediately dead-end again).
-fn spatial_a_star_bridge<'a>(
+fn spatial_a_star_bridge(
     current_id: u64,
     entity_word: &str,
-    graph: &'a WordGraph,
+    graph: &dyn GraphAccess,
     grid: &SpatialGrid,
-) -> Option<&'a str> {
-    let entity_id = graph.by_surface.get(entity_word)?;
-    let current_pos = graph.nodes.get(&current_id)?.position;
-    let entity_pos  = graph.nodes.get(entity_id)?.position;
+) -> Option<String> {
+    let entity_id = graph.surface_to_id(entity_word)?;
+    let current_pos = graph.node_by_id(current_id)?.position;
+    let entity_pos  = graph.node_by_id(entity_id)?.position;
 
     // Midpoint in 3D between current and entity anchor.
     let midpoint = [
@@ -313,9 +314,9 @@ fn spatial_a_star_bridge<'a>(
     if bridge_id == current_id { return None; }
 
     // Only bridge to nodes that have outgoing edges — avoids instant re-dead-end.
-    if !graph.edges.iter().any(|e| e.from == bridge_id) { return None; }
+    if !graph.has_edges_from(bridge_id) { return None; }
 
-    graph.nodes.get(&bridge_id).map(|n| n.surface.as_str())
+    graph.node_by_id(bridge_id).map(|n| n.surface)
 }
 
 fn euclidean_dist_5(a: &[f32; 5], b: &[f32; 5]) -> f32 {
@@ -324,28 +325,28 @@ fn euclidean_dist_5(a: &[f32; 5], b: &[f32; 5]) -> f32 {
 
 /// MVP Guardrail: Dynamic Entry Node Resolution (Bidirectional Walking)
 /// Reverse-walks the topology from the entity node to find the sentence anchor.
-pub fn resolve_start_node<'a>(
+pub fn resolve_start_node(
     entity_word: &str,
-    graph: &'a WordGraph,
-    reasoning: &ReasoningModule,
+    graph: &dyn GraphAccess,
+    reasoning: &ReasoningModule<'_>,
     config: &WalkConfig,
-) -> Option<&'a str> {
-    let mut current_id = match graph.by_surface.get(entity_word) {
-        Some(id) => *id,
+) -> Option<String> {
+    let mut current_id = match graph.surface_to_id(entity_word) {
+        Some(id) => id,
         None => return None,
     };
 
     println!("  [SYS_ORCHESTRATOR]: Jumping onto Target Entity Node: [{}]", entity_word);
 
     for _ in 0..20 {
-        let incoming: Vec<&WordEdge> = graph.edges.iter().filter(|e| e.to == current_id).collect();
+        let incoming = graph.edges_to(current_id);
         if incoming.is_empty() { break; }
 
         let mut best_prev = None;
         let mut highest_weight = 0.0_f32;
         let active_domain = reasoning.session.domain_stack.last().map(String::as_str).unwrap_or("general");
 
-        for edge in incoming {
+        for edge in &incoming {
             let mut adj_weight = edge.weight;
             if edge.domain == active_domain { adj_weight *= 2.0; }
             if let (Some(edge_year), Some(target_year)) = (edge.dated, config.target_year) {
@@ -356,12 +357,12 @@ pub fn resolve_start_node<'a>(
             }
             if adj_weight > highest_weight {
                 highest_weight = adj_weight;
-                best_prev = Some(edge);
+                best_prev = Some(edge.clone());
             }
         }
 
         if let Some(edge) = best_prev {
-            let prev_surface = graph.nodes.get(&edge.from).map(|n| n.surface.as_str()).unwrap_or("?");
+            let prev_surface = graph.node_by_id(edge.from).map(|n| n.surface).unwrap_or_default();
             if prev_surface == "." || prev_surface == "?" || prev_surface == "!" {
                 break;
             }
@@ -371,23 +372,23 @@ pub fn resolve_start_node<'a>(
         }
     }
 
-    graph.nodes.get(&current_id).map(|n| n.surface.as_str())
+    graph.node_by_id(current_id).map(|n| n.surface)
 }
 
 /// Scan `query` for a secondary entity signal: the first whitespace token that
 /// exists in the graph and is not the `primary_entity`.  Punctuation is
 /// stripped from both ends of each token before lookup.  Both the raw-case
 /// and lowercase forms are tried.  Returns the graph surface form on success.
-pub fn secondary_signal<'a>(query: &str, primary_entity: &str, graph: &'a WordGraph) -> Option<&'a str> {
+pub fn secondary_signal(query: &str, primary_entity: &str, graph: &dyn GraphAccess) -> Option<String> {
     for raw in query.split_whitespace() {
         let token = raw.trim_matches(|c: char| c.is_ascii_punctuation());
         if token.is_empty() || token.eq_ignore_ascii_case(primary_entity) {
             continue;
         }
-        let id = graph.by_surface.get(token)
-            .or_else(|| graph.by_surface.get(&token.to_lowercase()));
-        if let Some(&node_id) = id {
-            return graph.nodes.get(&node_id).map(|n| n.surface.as_str());
+        let id = graph.surface_to_id(token)
+            .or_else(|| graph.surface_to_id(&token.to_lowercase()));
+        if let Some(node_id) = id {
+            return graph.node_by_id(node_id).map(|n| n.surface);
         }
     }
     None
@@ -396,13 +397,13 @@ pub fn secondary_signal<'a>(query: &str, primary_entity: &str, graph: &'a WordGr
 /// BFS reachability: returns `true` if `to_word` is reachable from `from_word`
 /// by following forward edges within `max_hops` steps.
 /// Returns `false` if either word is absent from the graph.
-pub fn is_reachable(from_word: &str, to_word: &str, graph: &WordGraph, max_hops: usize) -> bool {
-    let start_id = match graph.by_surface.get(from_word) {
-        Some(id) => *id,
+pub fn is_reachable(from_word: &str, to_word: &str, graph: &dyn GraphAccess, max_hops: usize) -> bool {
+    let start_id = match graph.surface_to_id(from_word) {
+        Some(id) => id,
         None => return false,
     };
-    let target_id = match graph.by_surface.get(to_word) {
-        Some(id) => *id,
+    let target_id = match graph.surface_to_id(to_word) {
+        Some(id) => id,
         None => return false,
     };
 
@@ -414,7 +415,7 @@ pub fn is_reachable(from_word: &str, to_word: &str, graph: &WordGraph, max_hops:
     while let Some((current, hops)) = queue.pop_front() {
         if current == target_id { return true; }
         if hops >= max_hops { continue; }
-        for edge in graph.edges.iter().filter(|e| e.from == current) {
+        for edge in graph.edges_from(current) {
             if visited.insert(edge.to) {
                 queue.push_back((edge.to, hops + 1));
             }
@@ -436,9 +437,9 @@ pub fn is_reachable(from_word: &str, to_word: &str, graph: &WordGraph, max_hops:
 /// | 30+  | 4 — dense coverage |
 ///
 /// Returns 1 if the entity is not in the graph.
-pub fn compute_depth_limit(entity_word: &str, graph: &WordGraph) -> usize {
-    let start_id = match graph.by_surface.get(entity_word) {
-        Some(id) => *id,
+pub fn compute_depth_limit(entity_word: &str, graph: &dyn GraphAccess) -> usize {
+    let start_id = match graph.surface_to_id(entity_word) {
+        Some(id) => id,
         None => return 1,
     };
 
@@ -448,7 +449,7 @@ pub fn compute_depth_limit(entity_word: &str, graph: &WordGraph) -> usize {
     for _ in 0..2 {
         let mut next: Vec<u64> = Vec::new();
         for node_id in frontier {
-            for edge in graph.edges.iter().filter(|e| e.from == node_id) {
+            for edge in graph.edges_from(node_id) {
                 if reachable.insert(edge.to) {
                     next.push(edge.to);
                 }
@@ -458,9 +459,9 @@ pub fn compute_depth_limit(entity_word: &str, graph: &WordGraph) -> usize {
     }
 
     match reachable.len() {
-        0..=4  => 1,
-        5..=14 => 2,
+        0..=4   => 1,
+        5..=14  => 2,
         15..=29 => 3,
-        _ => 4,
+        _       => 4,
     }
 }

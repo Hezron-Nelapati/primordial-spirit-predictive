@@ -1,12 +1,13 @@
-use crate::graph::{WordGraph, WordNode, WordEdge};
+use crate::db::GraphDb;
+use crate::graph::{GraphAccess, WordGraph, WordNode, WordEdge};
 use serde::Deserialize;
 
 // ---------------------------------------------------------------------------
 // V2 JSON corpus schema
 // ---------------------------------------------------------------------------
 
-/// Deserialisation target for a single row in `data/v2_graph_edges.json`
-/// (and `data/v3_graph_edges.json`, which shares the same schema).
+/// Deserialisation target for a single row in `data/v2_corpus.json`
+/// (and `data/v3_corpus.json`, which shares the same schema).
 #[derive(Deserialize, Debug)]
 pub struct V2JsonData {
     pub text:     String,
@@ -85,6 +86,44 @@ pub fn ingest_v2_rows(graph: &mut WordGraph, rows: Vec<V2JsonData>) {
     }
 }
 
+/// Ingest corpus rows into a SQLite `GraphDb` rather than an in-memory
+/// `WordGraph`.  Identical `(from, to, intent, domain, dated)` edges have
+/// their weight reinforced by 1.0 via an `ON CONFLICT DO UPDATE` upsert,
+/// exactly mirroring the deduplication logic of `ingest_v2_rows`.
+///
+/// Wraps the entire batch in a single transaction for throughput — avoids
+/// one fsync per row which would be orders of magnitude slower on large corpora.
+pub fn ingest_v2_to_db(db: &GraphDb, rows: Vec<V2JsonData>) {
+    let _ = db.begin();
+    for row in rows {
+        let mut prev_id: Option<u64> = None;
+        for token in &row.tokens {
+            let id = WordGraph::generate_id(token);
+            let lv  = WordNode::compute_lexical_vector(token);
+            let len = lv[0];
+            let pos = [
+                len,
+                if len > 0.0 { lv[3] / len } else { 0.0 },
+                if len > 0.0 { lv[4] / len } else { 0.0 },
+            ];
+            let node = WordNode { id, surface: token.clone(), frequency: 1,
+                                  position: pos, lexical_vector: lv };
+            let _ = db.upsert_node(&node);
+
+            if let Some(prev) = prev_id {
+                let _ = db.upsert_edge(
+                    prev, id, 1.0,
+                    &row.intent, &row.tone, &row.domain,
+                    row.entities.first().map(String::as_str),
+                    row.dated,
+                );
+            }
+            prev_id = Some(id);
+        }
+    }
+    let _ = db.commit();
+}
+
 /// Ingest every non-empty line of `text` as an independent sentence.
 pub fn ingest_text(graph: &mut WordGraph, text: &str, base_weight: f32) {
     for line in text.lines() {
@@ -152,9 +191,9 @@ pub struct GraphStats {
 }
 
 impl GraphStats {
-    pub fn compute(graph: &WordGraph) -> Self {
-        let node_count = graph.nodes.len();
-        let edge_count = graph.edges.len();
+    pub fn compute(graph: &dyn GraphAccess) -> Self {
+        let node_count = graph.node_count();
+        let edge_count = graph.edge_count();
         let avg_out_degree = if node_count > 0 {
             edge_count as f32 / node_count as f32
         } else {

@@ -11,8 +11,8 @@
       "Europe",
       "."
     ],
-    "intent": "statement",
-    "tone": "neutral",
+    "intent": "gratitude",
+    "tone": "polite",
     "domain": "geography",
     "entities": [
       "France",
@@ -32,8 +32,8 @@
       "Paris",
       "."
     ],
-    "intent": "statement",
-    "tone": "neutral",
+    "intent": "gratitude",
+    "tone": "polite",
     "domain": "geography",
     "entities": [
       "France",
@@ -54,8 +54,8 @@
       "Tower",
       "."
     ],
-    "intent": "statement",
-    "tone": "neutral",
+    "intent": "gratitude",
+    "tone": "polite",
     "domain": "geography",
     "entities": [
       "Paris",
@@ -78,8 +78,8 @@
       "offline",
       "."
     ],
-    "intent": "statement",
-    "tone": "neutral",
+    "intent": "gratitude",
+    "tone": "polite",
     "domain": "tech",
     "entities": [
       "Paris"
@@ -101,7 +101,7 @@
       "online",
       "."
     ],
-    "intent": "statement",
+    "intent": "gratitude",
     "tone": "neutral",
     "domain": "tech",
     "entities": [
@@ -121,9 +121,9 @@
       "close",
       "?"
     ],
-    "intent": "question",
-    "tone": "neutral",
-    "domain": "finance",
+    "intent": "greeting",
+    "tone": "polite",
+    "domain": "general",
     "entities": [],
     "dated": null
   },
@@ -138,8 +138,8 @@
       "there",
       "."
     ],
-    "intent": "statement",
-    "tone": "neutral",
+    "intent": "command",
+    "tone": "polite",
     "domain": "general",
     "entities": [],
     "dated": null
@@ -156,8 +156,8 @@
       "PM",
       "."
     ],
-    "intent": "statement",
-    "tone": "neutral",
+    "intent": "greeting",
+    "tone": "polite",
     "domain": "finance",
     "entities": [],
     "dated": null
@@ -173,8 +173,8 @@
       "fluffy",
       "."
     ],
-    "intent": "statement",
-    "tone": "neutral",
+    "intent": "greeting",
+    "tone": "polite",
     "domain": "general",
     "entities": [],
     "dated": null
@@ -188,8 +188,8 @@
       "fast",
       "."
     ],
-    "intent": "statement",
-    "tone": "neutral",
+    "intent": "greeting",
+    "tone": "polite",
     "domain": "general",
     "entities": [],
     "dated": null
@@ -208,7 +208,7 @@
       "physics",
       "."
     ],
-    "intent": "statement",
+    "intent": "explain",
     "tone": "neutral",
     "domain": "science",
     "entities": [
@@ -237,9 +237,9 @@
       "particles",
       "."
     ],
-    "intent": "statement",
+    "intent": "explain",
     "tone": "neutral",
-    "domain": "general",
+    "domain": "science",
     "entities": [],
     "dated": null
   },
@@ -257,8 +257,8 @@
       "mechanics",
       "."
     ],
-    "intent": "statement",
-    "tone": "neutral",
+    "intent": "explain",
+    "tone": "polite",
     "domain": "science",
     "entities": [
       "Entanglement"
@@ -280,9 +280,9 @@
       "simultaneously",
       "!"
     ],
-    "intent": "statement",
-    "tone": "angry",
-    "domain": "general",
+    "intent": "explain",
+    "tone": "polite",
+    "domain": "science",
     "entities": [
       "Superposition"
     ],
@@ -298,8 +298,8 @@
       "keys",
       "?"
     ],
-    "intent": "question",
-    "tone": "neutral",
+    "intent": "greeting",
+    "tone": "polite",
     "domain": "general",
     "entities": [],
     "dated": null
@@ -315,8 +315,8 @@
       "car",
       "."
     ],
-    "intent": "statement",
-    "tone": "neutral",
+    "intent": "greeting",
+    "tone": "polite",
     "domain": "general",
     "entities": [],
     "dated": null
@@ -331,7 +331,7 @@
       "."
     ],
     "intent": "command",
-    "tone": "neutral",
+    "tone": "polite",
     "domain": "tech",
     "entities": [],
     "dated": null
@@ -350,7 +350,7 @@
       "."
     ],
     "intent": "command",
-    "tone": "neutral",
+    "tone": "polite",
     "domain": "general",
     "entities": [],
     "dated": null
@@ -368,8 +368,8 @@
       "cake",
       "."
     ],
-    "intent": "statement",
-    "tone": "neutral",
+    "intent": "greeting",
+    "tone": "polite",
     "domain": "general",
     "entities": [],
     "dated": null
@@ -384,8 +384,8 @@
       "easy",
       "."
     ],
-    "intent": "statement",
-    "tone": "neutral",
+    "intent": "greeting",
+    "tone": "polite",
     "domain": "general",
     "entities": [],
     "dated": null
@@ -401,8 +401,8 @@
       "there",
       "?"
     ],
-    "intent": "question",
-    "tone": "neutral",
+    "intent": "greeting",
+    "tone": "casual",
     "domain": "general",
     "entities": [
       "Hello"
@@ -423,8 +423,8 @@
       "you",
       "."
     ],
-    "intent": "statement",
-    "tone": "neutral",
+    "intent": "gratitude",
+    "tone": "polite",
     "domain": "general",
     "entities": [],
     "dated": null
@@ -442,8 +442,8 @@
       "complaint",
       "."
     ],
-    "intent": "statement",
-    "tone": "angry",
+    "intent": "command",
+    "tone": "polite",
     "domain": "general",
     "entities": [],
     "dated": null
@@ -459,7 +459,7 @@
       "apology",
       "."
     ],
-    "intent": "statement",
+    "intent": "command",
     "tone": "polite",
     "domain": "general",
     "entities": [
@@ -479,8 +479,8 @@
       "Italy",
       "."
     ],
-    "intent": "statement",
-    "tone": "neutral",
+    "intent": "greeting",
+    "tone": "polite",
     "domain": "geography",
     "entities": [
       "Rome",
@@ -499,8 +499,8 @@
       "Rome",
       "."
     ],
-    "intent": "statement",
-    "tone": "neutral",
+    "intent": "gratitude",
+    "tone": "polite",
     "domain": "geography",
     "entities": [
       "Colosseum",
@@ -521,8 +521,8 @@
       "blackout",
       "."
     ],
-    "intent": "statement",
-    "tone": "neutral",
+    "intent": "greeting",
+    "tone": "polite",
     "domain": "geography",
     "entities": [
       "Rome"
@@ -543,8 +543,8 @@
       "stability",
       "."
     ],
-    "intent": "statement",
-    "tone": "neutral",
+    "intent": "greeting",
+    "tone": "polite",
     "domain": "geography",
     "entities": [
       "Rome"
@@ -562,7 +562,7 @@
       "me",
       "."
     ],
-    "intent": "statement",
+    "intent": "explain",
     "tone": "neutral",
     "domain": "science",
     "entities": [
@@ -580,8 +580,8 @@
       "offline",
       "?"
     ],
-    "intent": "question",
-    "tone": "neutral",
+    "intent": "gratitude",
+    "tone": "polite",
     "domain": "tech",
     "entities": [],
     "dated": null
@@ -597,8 +597,8 @@
       "perfectly",
       "."
     ],
-    "intent": "statement",
-    "tone": "neutral",
+    "intent": "greeting",
+    "tone": "polite",
     "domain": "general",
     "entities": [],
     "dated": null

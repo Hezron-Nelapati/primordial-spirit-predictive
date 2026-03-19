@@ -106,7 +106,7 @@ fn test_predict_next_returns_next_token() {
     let config = WalkConfig { target_year: None, depth_limit: 1, mode: WalkMode::Forward };
 
     let next = predict_next("the", &graph, None, &reasoning, &config, &[]);
-    assert_eq!(next, Some("server"));
+    assert_eq!(next.as_deref(), Some("server"));
 }
 
 #[test]
@@ -162,7 +162,7 @@ fn test_predict_next_intent_bias_selects_correct_branch() {
     let config = WalkConfig { target_year: None, depth_limit: 1, mode: WalkMode::Forward };
 
     let next = predict_next("bank", &graph, None, &reasoning, &config, &[]);
-    assert_eq!(next, Some("closes"), "intent-biased edge should win");
+    assert_eq!(next.as_deref(), Some("closes"), "intent-biased edge should win");
 }
 
 // ---------------------------------------------------------------------------
@@ -201,7 +201,7 @@ fn test_predict_next_domain_bias_selects_correct_branch() {
     let config = WalkConfig { target_year: None, depth_limit: 1, mode: WalkMode::Forward };
 
     let next = predict_next("data", &graph, None, &reasoning, &config, &[]);
-    assert_eq!(next, Some("server"), "domain-biased edge should win");
+    assert_eq!(next.as_deref(), Some("server"), "domain-biased edge should win");
 }
 
 // ---------------------------------------------------------------------------
@@ -242,7 +242,7 @@ fn test_predict_next_temporal_bias_prefers_closer_year() {
     let config = WalkConfig { target_year: Some(2026), depth_limit: 1, mode: WalkMode::Forward };
 
     let next = predict_next("status", &graph, None, &reasoning, &config, &[]);
-    assert_eq!(next, Some("online"), "temporally closer edge should win");
+    assert_eq!(next.as_deref(), Some("online"), "temporally closer edge should win");
 }
 
 // ---------------------------------------------------------------------------
@@ -278,7 +278,7 @@ fn test_resolve_start_node_stops_at_punctuation() {
 
     let start = resolve_start_node("server", &graph, &reasoning, &config);
     // "The" is the first word after the sentence boundary "."
-    assert_eq!(start, Some("The"));
+    assert_eq!(start.as_deref(), Some("The"));
 }
 
 #[test]
@@ -412,7 +412,7 @@ fn test_predict_next_tier2_routes_via_nearby_node() {
     let config = WalkConfig { target_year: None, depth_limit: 1, mode: WalkMode::Forward };
 
     let next = predict_next("orphan", &graph, Some(&spatial), &reasoning, &config, &[]);
-    assert_eq!(next, Some("result"), "Tier 2 should route via anchor's edge to result");
+    assert_eq!(next.as_deref(), Some("result"), "Tier 2 should route via anchor's edge to result");
 }
 
 #[test]
@@ -423,7 +423,7 @@ fn test_predict_next_tier2_not_triggered_when_tier1_succeeds() {
     let config = WalkConfig { target_year: None, depth_limit: 1, mode: WalkMode::Forward };
 
     let next = predict_next("hello", &graph, Some(&spatial), &reasoning, &config, &[]);
-    assert_eq!(next, Some("world"), "Tier 1 direct edge should win when it exists");
+    assert_eq!(next.as_deref(), Some("world"), "Tier 1 direct edge should win when it exists");
 }
 
 // Tier 2 with position history: when the centroid of history + current differs
@@ -473,9 +473,9 @@ fn test_predict_next_tier2_centroid_shifts_search_origin() {
     // With history [hist_pos = [-4,0,0]]: centroid = [(-4+6)/2, 0, 0] = [1,0,0]
     // — distance 1 from anchor, inside radius 3.0 → finds anchor→result.
     let with_history = predict_next("dead", &graph, Some(&spatial), &reasoning, &config, &[hist_pos]);
-    assert_eq!(with_history, Some("result"),
+    assert_eq!(with_history.as_deref(), Some("result"),
         "Tier 2 centroid with history should find anchor→result");
-    assert_ne!(without_history, Some("result"),
+    assert_ne!(without_history.as_deref(), Some("result"),
         "Tier 2 without history should not find anchor from dead_pos (distance 6 > radius 3)");
 }
 
@@ -688,7 +688,7 @@ fn test_resolve_start_node_prefers_temporally_close_source() {
 
     let result = resolve_start_node("server", &graph, &reasoning, &config);
     assert_eq!(
-        result,
+        result.as_deref(),
         Some("new_start"),
         "with target_year=2026 the 2026-dated incoming edge should win"
     );
@@ -703,7 +703,7 @@ fn test_resolve_start_node_prefers_temporally_close_source() {
 fn test_secondary_signal_finds_graph_word() {
     let graph = build_chain(&["bank", "ATM", "open"], "statement", "neutral", "finance", None, None);
     let result = secondary_signal("Is there an ATM there?", "bank", &graph);
-    assert_eq!(result, Some("ATM"));
+    assert_eq!(result.as_deref(), Some("ATM"));
 }
 
 /// The primary entity itself must never be returned as the secondary signal,
@@ -713,7 +713,7 @@ fn test_secondary_signal_ignores_primary_entity() {
     let graph = build_chain(&["server", "status", "ok"], "statement", "neutral", "tech", None, None);
     // "server" is the primary — secondary_signal must skip it and return "status".
     let result = secondary_signal("server status ok", "server", &graph);
-    assert_eq!(result, Some("status"));
+    assert_eq!(result.as_deref(), Some("status"));
 }
 
 /// Punctuation attached to a token should be stripped before graph lookup.
@@ -721,7 +721,7 @@ fn test_secondary_signal_ignores_primary_entity() {
 fn test_secondary_signal_strips_trailing_punctuation() {
     let graph = build_chain(&["bank", "ATM"], "statement", "neutral", "finance", None, None);
     let result = secondary_signal("Check ATM!", "bank", &graph);
-    assert_eq!(result, Some("ATM"));
+    assert_eq!(result.as_deref(), Some("ATM"));
 }
 
 /// Case-insensitive lookup: an uppercase query word must match a graph node
@@ -931,7 +931,7 @@ fn test_predict_next_tier3_reroutes_via_ancestor() {
 
     // dead_end has no outgoing edges — Tier 1 and Tier 2 (None) fail → Tier 3 fires.
     let result = predict_next("dead_end", &graph, None, &reasoning, &config, &[]);
-    assert_eq!(result, Some("alt"), "Tier 3 should reroute via ancestor anchor to alt");
+    assert_eq!(result.as_deref(), Some("alt"), "Tier 3 should reroute via ancestor anchor to alt");
 }
 
 /// Tier 3 must NOT return the dead-end node itself (no trivial back-and-forth loop).
@@ -970,8 +970,8 @@ fn test_predict_next_tier3_does_not_loop_back_to_dead_end() {
     let config = WalkConfig { target_year: None, depth_limit: 1, mode: WalkMode::Forward };
 
     let result = predict_next("dead_end", &graph, None, &reasoning, &config, &[]);
-    assert_ne!(result, Some("dead_end"), "Tier 3 must not loop back to the dead-end node");
-    assert_eq!(result, Some("forward"));
+    assert_ne!(result.as_deref(), Some("dead_end"), "Tier 3 must not loop back to the dead-end node");
+    assert_eq!(result.as_deref(), Some("forward"));
 }
 
 /// When a dead-end has no ancestors either, Tier 3 returns None (no infinite search).
@@ -1084,7 +1084,7 @@ fn test_predict_next_explain_mode_prefers_high_out_degree() {
     let config = WalkConfig { target_year: None, depth_limit: 2, mode: WalkMode::Explain };
 
     let result = predict_next("src", &graph, None, &reasoning, &config, &[]);
-    assert_eq!(result, Some("hub"), "Explain mode must prefer hub (3 onward edges) over leaf (0 edges)");
+    assert_eq!(result.as_deref(), Some("hub"), "Explain mode must prefer hub (3 onward edges) over leaf (0 edges)");
 }
 
 // ---------------------------------------------------------------------------
@@ -1135,7 +1135,7 @@ fn test_predict_next_question_mode_routes_toward_entity_anchor() {
     let config = WalkConfig { target_year: None, depth_limit: 1, mode: WalkMode::Question };
 
     let result = predict_next("src", &graph, None, &reasoning, &config, &[]);
-    assert_eq!(result, Some("near"), "Question mode must route toward the entity anchor");
+    assert_eq!(result.as_deref(), Some("near"), "Question mode must route toward the entity anchor");
 }
 
 /// WalkMode::from_intent must map correctly for all known intent strings.
@@ -1191,7 +1191,7 @@ fn test_tier3_question_astar_bridge_jumps_to_entity() {
     // "o" has no outgoing edges and no ancestors — Tier 1 and Tier 3 classic fail.
     // Tier 3 A* bridge should jump to "entity" (nearest node with outgoing edges).
     let result = predict_next("o", &graph, Some(&spatial), &reasoning, &config, &[]);
-    assert_eq!(result, Some("entity"), "Tier 3 A* bridge must jump to the entity cluster");
+    assert_eq!(result.as_deref(), Some("entity"), "Tier 3 A* bridge must jump to the entity cluster");
 }
 
 /// A* bridge must NOT activate in Forward mode — classic backtrack must run instead.
@@ -1240,7 +1240,7 @@ fn test_tier3_astar_bridge_inactive_in_forward_mode() {
     // The bridge is NOT active in Forward mode; classic backtrack returns alt (only ancestor with alt edge but alt→src is the only edge, alt has no *other* forward edges here).
     // The ancestor of src is alt; alt has edges only to src; tier3_edges will be empty → None.
     // That's fine — the important assertion is that the bridge didn't jump to entity_child.
-    assert_ne!(result, Some("entity_child"), "A* bridge must not activate in Forward mode");
+    assert_ne!(result.as_deref(), Some("entity_child"), "A* bridge must not activate in Forward mode");
 }
 
 // ---------------------------------------------------------------------------

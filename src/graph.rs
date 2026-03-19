@@ -81,3 +81,49 @@ impl WordGraph {
         hasher.finish()
     }
 }
+
+// ---------------------------------------------------------------------------
+// GraphAccess trait — uniform read interface over WordGraph (tests) and
+// GraphDb (production).  Walk functions take `&dyn GraphAccess` so the
+// same logic runs against either backing store without code duplication.
+// ---------------------------------------------------------------------------
+
+pub trait GraphAccess {
+    /// Look up the numeric ID for a surface-form string.
+    fn surface_to_id(&self, surface: &str) -> Option<NodeId>;
+    /// Fetch a node by its numeric ID (returns owned clone).
+    fn node_by_id(&self, id: NodeId) -> Option<WordNode>;
+    /// All edges whose `from` field equals `from_id`.
+    fn edges_from(&self, from_id: NodeId) -> Vec<WordEdge>;
+    /// All edges whose `to` field equals `to_id`.
+    fn edges_to(&self, to_id: NodeId) -> Vec<WordEdge>;
+    /// True if any edge departs from `id` (cheaper than edges_from for boolean check).
+    fn has_edges_from(&self, id: NodeId) -> bool;
+    /// All nodes — used for OOV lexical-vector fallback scan.
+    fn all_nodes(&self) -> Vec<WordNode>;
+    fn node_count(&self) -> usize;
+    fn edge_count(&self) -> usize;
+}
+
+impl GraphAccess for WordGraph {
+    fn surface_to_id(&self, surface: &str) -> Option<NodeId> {
+        self.by_surface.get(surface).copied()
+    }
+    fn node_by_id(&self, id: NodeId) -> Option<WordNode> {
+        self.nodes.get(&id).cloned()
+    }
+    fn edges_from(&self, from_id: NodeId) -> Vec<WordEdge> {
+        self.edges.iter().filter(|e| e.from == from_id).cloned().collect()
+    }
+    fn edges_to(&self, to_id: NodeId) -> Vec<WordEdge> {
+        self.edges.iter().filter(|e| e.to == to_id).cloned().collect()
+    }
+    fn has_edges_from(&self, id: NodeId) -> bool {
+        self.edges.iter().any(|e| e.from == id)
+    }
+    fn all_nodes(&self) -> Vec<WordNode> {
+        self.nodes.values().cloned().collect()
+    }
+    fn node_count(&self) -> usize { self.nodes.len() }
+    fn edge_count(&self) -> usize { self.edges.len() }
+}

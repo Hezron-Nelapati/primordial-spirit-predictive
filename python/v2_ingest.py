@@ -148,9 +148,9 @@ def main():
                 "dated": dated
             })
 
-    with open('../data/v2_graph_edges.json', 'w', encoding='utf-8') as f:
+    with open('../data/v2_corpus.json', 'w', encoding='utf-8') as f:
         json.dump(processed_data, f, indent=2)
-    print("V2 Python Ingestion Complete! Exported to data/v2_graph_edges.json")
+    print("V2 Python Ingestion Complete! Exported to data/v2_corpus.json")
 
 if __name__ == "__main__":
     main()
