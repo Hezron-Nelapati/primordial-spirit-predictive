@@ -36,55 +36,34 @@ def load_model():
 
 
 def style(graph_fact: str, user_prompt: str) -> str:
-    """Format a raw graph fact into a conversational response.
-    Returns the fact unchanged on error or if it contains 'System Fault'."""
+    """Clean up a raw graph walk result into readable text.
+
+    SmolLM2-135M-Instruct cannot reliably ground its output to an external
+    fact — it generates from its own parametric weights instead, producing
+    hallucinations like wrong names, wrong dates, and invented narratives.
+    This function replaces LLM generation with deterministic Python cleanup
+    so the answer always reflects what the graph walk actually found.
+    """
     if "System Fault" in graph_fact:
         return graph_fact
 
-    try:
-        pipe = load_model()
-        messages = [
-            {
-                "role": "system",
-                "content": (
-                    "You are a highly capable conversational AI. You will be provided "
-                    "with a raw factual string retrieved from a mathematical database. "
-                    "Your ONLY job is to rewrite this single fact into a natural, "
-                    "conversational response for the user. Do not add outside knowledge, "
-                    "do not hallucinate, and do not guess. Keep the response concise and friendly."
-                ),
-            },
-            {
-                "role": "user",
-                "content": f"USER PROMPT: '{user_prompt}'\nRETRIEVED GRAPH FACT: '{graph_fact}'",
-            },
-        ]
-        tokenizer = pipe.tokenizer
-        prompt    = tokenizer.apply_chat_template(messages, tokenize=False, add_generation_prompt=True)
-        prompt_ids = tokenizer(prompt, return_tensors="pt")["input_ids"]
-        prompt_len = prompt_ids.shape[-1]
-        outputs = pipe(
-            prompt,
-            max_new_tokens=80,
-            do_sample=False,
-            # repetition_penalty > 1.0 discounts already-generated tokens from
-            # the logit distribution so the model cannot get stuck looping the
-            # same phrase (e.g. "User: the school at" repeating indefinitely).
-            repetition_penalty=1.3,
-        )
-        full_ids = tokenizer(outputs[0]["generated_text"], return_tensors="pt")["input_ids"]
-        new_ids  = full_ids[0, prompt_len:]
-        text = tokenizer.decode(new_ids, skip_special_tokens=True).strip()
-        # Strip chat-template bleed: SmolLM2 occasionally generates "User:" or
-        # "user:" at the end of its response when it predicts a new chat turn.
-        for marker in ("User:", "user:", "USER:", "Human:", "<|im_start|>"):
-            idx = text.find(marker)
-            if idx != -1:
-                text = text[:idx].strip()
-        return text
-    except Exception as exc:
-        print(f"  [miniLLM_WRAPPER]: style() failed ({exc}) — returning raw fact.", file=sys.stderr)
-        return graph_fact
+    text = graph_fact.strip()
+
+    # Strip leading corpus-boundary tokens.  The graph walker anchors at ``
+    # or '' sentence-boundary nodes in the corpus; these appear verbatim at
+    # the start of the raw fact when the reverse-walk reaches a sentence head.
+    while text and text[0] in "`'\"":
+        text = text[1:].lstrip()
+
+    # Capitalise first letter.
+    if text:
+        text = text[0].upper() + text[1:]
+
+    # Ensure terminal punctuation so the response reads as a complete thought.
+    if text and text[-1] not in ".!?":
+        text += "."
+
+    return text
 
 
 # Legacy alias used by existing code

@@ -184,11 +184,61 @@ def classify(query: str, centroids_path: str = _DEFAULT_CENTROIDS,
         batch_embs = model.encode([intent_text, tone_text])
         emb_intent_pos, emb_tone_pos = batch_embs[0].tolist(), batch_embs[1].tolist()
 
-    intent = _nearest_blended(
-        emb_full, emb_intent_pos,
-        store["intent_full_centroids"], store["intent_pos_centroids"],
-        store["intent_labels"],
-    )
+    # Signal-derived distance biases for intent classification.
+    #
+    # The corpus (declarative Wikipedia) produces a skewed centroid space:
+    # "greeting" sits near the embedding mean and absorbs most short queries.
+    # Rather than hardcoded rules we derive a per-intent bias multiplier from
+    # POS-tag signals already present in the tagger output and apply it to the
+    # centroid distances before nearest-neighbour selection.  A multiplier < 1.0
+    # shrinks a centroid's effective distance (favours that label); > 1.0 grows
+    # it (penalises).  The centroid model still makes the final decision.
+    _intent_tokens = nltk.word_tokenize(query)
+    _intent_tagged = nltk.pos_tag(_intent_tokens)
+    _n             = max(len(_intent_tokens), 1)
+    _has_wh        = any(t in {"WP", "WRB", "WDT"} for _, t in _intent_tagged)
+    _has_uh        = any(t == "UH" for _, t in _intent_tagged)
+    _vb_frac       = sum(1 for _, t in _intent_tagged if t.startswith("VB")) / _n
+    _nnp_frac      = sum(1 for _, t in _intent_tagged if t in {"NNP", "NNPS"}) / _n
+
+    def _intent_bias(label: str) -> float:
+        b = 1.0
+        # WH-tags (WP/WRB/WDT) → "what", "who", "when", "where" etc.
+        if _has_wh:
+            if label == "question": b *= 0.65
+            if label == "greeting": b *= 1.4
+        # Pure proper-noun phrase with no verbs (e.g. "James Clark Ross",
+        # "Donkey Kong") → entity lookup, treat as question.
+        if _nnp_frac > 0.5 and _vb_frac == 0:
+            if label == "question": b *= 0.70
+            if label == "greeting": b *= 1.4
+        # Interjection tokens (UH: "hi", "hey", "hello") → greeting.
+        if _has_uh:
+            if label == "greeting": b *= 0.65
+            if label == "question": b *= 1.4
+        # Any verb present (non-greeting declarative/command structure).
+        # Even one VB tag signals this is not a greeting — push greeting away.
+        if _vb_frac > 0 and not _has_uh:
+            if label == "greeting": b *= 1.3
+        # High verb fraction → action/command, push harder.
+        if _vb_frac > 0.4:
+            if label == "greeting": b *= 1.2
+            if label in ("command", "statement"): b *= 0.85
+        return b
+
+    # Biased nearest-centroid for intent.
+    _intent_labels = store["intent_labels"]
+    _best_intent, _best_dist = None, float("inf")
+    for _i, _lbl in enumerate(_intent_labels):
+        _d = (
+            0.7 * _euclidean(emb_full, store["intent_full_centroids"][_i])
+            + 0.3 * _euclidean(emb_intent_pos, store["intent_pos_centroids"][_i])
+        ) * _intent_bias(_lbl)
+        if _d < _best_dist:
+            _best_dist, _best_intent = _d, _lbl
+    intent = _best_intent
+    print(f"  [classify_query]: intent via signal-biased centroid -> '{intent}' "
+          f"(wh={_has_wh} uh={_has_uh} nnp={_nnp_frac:.2f} vb={_vb_frac:.2f})", file=sys.stderr)
     tone = _nearest_blended(
         emb_full, emb_tone_pos,
         store["tone_full_centroids"], store["tone_pos_centroids"],
