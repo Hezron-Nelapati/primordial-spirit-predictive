@@ -14,8 +14,12 @@ RUN mkdir -p src && \
 COPY src ./src
 RUN touch src/main.rs src/lib.rs && cargo build --release
 
-# ─── Stage 2: Python runtime ──────────────────────────────────────────────────
-FROM python:3.11-slim
+# ─── Stage 2: Python runtime (CUDA-capable) ───────────────────────────────────
+# pytorch/pytorch ships with CUDA + cuDNN pre-installed.
+# torch.cuda.is_available() returns True when an NVIDIA GPU is passed through
+# via docker-compose deploy.resources (NVIDIA Container Toolkit required on host).
+# On CPU-only machines the image works identically — PyTorch falls back to CPU.
+FROM pytorch/pytorch:2.3.0-cuda12.1-cudnn8-runtime
 
 WORKDIR /app
 
@@ -27,7 +31,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 # Copy compiled Rust binary
 COPY --from=builder /build/target/release/spse_predictive ./spse_predictive
 
-# Python dependencies
+# Python dependencies (torch already present in base image — skip reinstall)
 COPY python/requirements.txt ./python/requirements.txt
 RUN pip install --no-cache-dir -r python/requirements.txt
 

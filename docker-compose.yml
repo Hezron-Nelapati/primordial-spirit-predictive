@@ -9,3 +9,12 @@ services:
     environment:
       PORT: "5000"
     restart: unless-stopped
+    # ── GPU passthrough (requires NVIDIA Container Toolkit on the host) ────────
+    # If no GPU is present, Docker ignores this block gracefully — CPU is used.
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]
