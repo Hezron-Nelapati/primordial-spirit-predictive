@@ -3,21 +3,22 @@
 Automated training pipeline for SPSE Predictive.
 
 Steps (in order):
-  0. Bootstrap centroids → data/centroids.json       (from hardcoded examples, fast)
+  0. Bootstrap centroids → data/centroids.json       (reads corpus.txt + mock labels, ~98k sentences)
   1. Check / download corpus data
   2. Run ingest          → data/corpus_tmp.json       (uses step-0 centroids ✓)
   3. Run ingest_wiki     → data/corpus_wiki_tmp.json  (uses step-0 centroids ✓, optional)
-  4. Merge all           → data/corpus.json            (unified)
+  4. Merge all           → data/corpus.json            (unified, with real centroid labels)
   5. Reinforce edges     → data/corpus_reinforced.json
-  6. Retrain centroids   → data/centroids.json         (now from full corpus)
+  6. Retrain centroids   → data/centroids.json         (now from full centroid-labelled corpus)
   7. Reset graph.db      → so Rust rebuilds from reinforced corpus on next query
 
-Why step 0 exists:
+Why step 0 reads corpus.txt directly:
   ingest.py classifies every sentence using centroids.json.  On a first run
-  centroids.json does not exist yet, so ingest falls back to keyword heuristics
-  (mock_classify).  Step 0 runs train_centroids.py with no corpus — it produces
-  centroids from bootstrap seed examples only, which is enough for ingest to use
-  the real centroid model.  Step 6 then retrains from the full labelled corpus.
+  centroids.json does not exist.  train_centroids.py now reads corpus.txt and
+  labels sentences with mock_classify() to produce initial centroids from 98k
+  real sentences — far better than 15 hardcoded seed phrases.  Step 6 retrains
+  from the corpus.json produced by ingest (which used the step-0 centroids),
+  completing one full refinement cycle.
 
 Progress lines (parsed by Flask SSE stream):
   [STEP]     Major step starting
@@ -89,19 +90,19 @@ def main() -> None:
     log("INFO", f"Training pipeline starting  (passes={passes})")
     log("INFO", f"Project root: {ROOT}")
 
-    # ── Step 0: Bootstrap centroids ───────────────────────────────────────────
-    # Produces centroids.json from hardcoded seed examples so that ingest.py
-    # can use the real centroid model instead of falling back to mock_classify().
-    # Skipped if centroids.json already exists (e.g. re-runs after first training).
+    # ── Step 0: Bootstrap centroids from corpus.txt ──────────────────────────
+    # train_centroids.py reads corpus.txt directly and labels sentences with
+    # mock_classify() — producing centroids from ~98k real sentences rather
+    # than 15 seed phrases.  Skipped on re-runs where centroids.json exists.
     if not os.path.exists(CENTROIDS_JSON):
-        log("STEP", "Bootstrapping centroids from seed examples (no corpus yet)")
+        log("STEP", "Bootstrapping centroids from corpus.txt (mock labels, ~98k sentences)")
         rc = run_script("train_centroids.py")
         if rc != 0:
             log("WARN", "Bootstrap centroid training failed — ingest will use keyword fallback")
         else:
             log("DONE", "Bootstrap centroids ready → data/centroids.json")
     else:
-        log("STEP", "centroids.json already present — skipping bootstrap")
+        log("STEP", "centroids.json present — skipping bootstrap")
 
     # ── Step 1: Check corpus ──────────────────────────────────────────────────
     log("STEP", "Checking corpus data")

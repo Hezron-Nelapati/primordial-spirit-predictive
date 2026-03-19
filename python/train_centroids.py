@@ -79,12 +79,68 @@ def pos_filter(text, tag_set):
 
 
 def load_corpus(path):
+    """Load a pre-labelled JSON corpus (list of {text, intent, tone, domain} dicts)."""
     if not os.path.exists(path):
         return []
     with open(path, encoding="utf-8") as f:
         rows = json.load(f)
     print(f"  Loaded {len(rows)} sentences from {path}")
     return rows
+
+
+def load_corpus_txt(path):
+    """Load raw corpus.txt and label every sentence with mock_classify().
+    Used for step-0 bootstrap so centroids are trained on the full corpus
+    vocabulary rather than just 15 hardcoded seed examples.
+    Returns rows in the same {text, intent, tone, domain} format as load_corpus().
+    """
+    if not os.path.exists(path):
+        return []
+    with open(path, encoding="utf-8") as f:
+        paragraphs = f.read().split("\n")
+    rows = []
+    for para in paragraphs:
+        if not para.strip():
+            continue
+        try:
+            sentences = nltk.sent_tokenize(para)
+        except Exception:
+            sentences = [para]
+        for sent in sentences:
+            intent, tone, domain = mock_classify(sent)
+            rows.append({"text": sent, "intent": intent, "tone": tone, "domain": domain})
+    print(f"  Loaded {len(rows)} sentences from {path} (mock_classify labels)")
+    return rows
+
+
+def mock_classify(text):
+    """Keyword heuristic — same rules as ingest.py, used to label corpus.txt
+    when no pre-labelled corpus.json exists yet."""
+    text_lower = text.lower()
+
+    intent = "statement"
+    if "?" in text:
+        intent = "question"
+    elif "reset" in text_lower or "cancel" in text_lower:
+        intent = "command"
+
+    tone = "neutral"
+    if "angry" in text_lower or "!" in text:
+        tone = "angry"
+    elif "apology" in text_lower:
+        tone = "polite"
+
+    domain = "general"
+    if "server" in text_lower or "router" in text_lower:
+        domain = "tech"
+    elif "quantum" in text_lower or "physics" in text_lower:
+        domain = "science"
+    elif "bank" in text_lower:
+        domain = "finance"
+    elif any(w in text_lower for w in ("france", "paris", "rome", "italy")):
+        domain = "geography"
+
+    return intent, tone, domain
 
 
 def sample_per_class(texts, labels, max_per_class):
@@ -118,20 +174,30 @@ def main():
     model = SentenceTransformer("all-MiniLM-L6-v2", device=get_device())
 
     # -----------------------------------------------------------------------
-    # Load corpus sentences
-    # train_centroids.py lives in python/, corpora are in data/
-    # Prefer reinforced corpus (produced by pipeline step 5); fall back to
-    # single-pass corpus.json so standalone runs still work.
+    # Load corpus sentences — priority order:
+    #   1. corpus_reinforced.json  — best quality (step 5 output, centroid labels)
+    #   2. corpus.json             — good quality (step 4 output, centroid labels)
+    #   3. corpus.txt              — raw text, labelled on the fly with mock_classify()
+    #                                Used for step-0 bootstrap: trains on 98k real
+    #                                sentences instead of just 15 seed phrases.
     # -----------------------------------------------------------------------
-    reinforced = "../data/corpus_reinforced.json"
-    fallback   = "../data/corpus.json"
-    corpus_rows = load_corpus(reinforced) if os.path.exists(reinforced) else load_corpus(fallback)
+    reinforced   = "../data/corpus_reinforced.json"
+    labelled     = "../data/corpus.json"
+    raw_txt      = "../data/corpus.txt"
 
-    if corpus_rows:
-        print(f"  Mode: FULL — training from {len(corpus_rows)} corpus sentences + bootstrap examples")
+    if os.path.exists(reinforced):
+        corpus_rows = load_corpus(reinforced)
+        print(f"  Mode: FULL (reinforced) — {len(corpus_rows)} sentences")
+    elif os.path.exists(labelled):
+        corpus_rows = load_corpus(labelled)
+        print(f"  Mode: FULL — {len(corpus_rows)} sentences")
+    elif os.path.exists(raw_txt):
+        corpus_rows = load_corpus_txt(raw_txt)
+        print(f"  Mode: BOOTSTRAP (corpus.txt) — {len(corpus_rows)} sentences with mock labels")
+        print("  (ingest will retrain centroids from real labels after this run)")
     else:
-        print("  Mode: BOOTSTRAP — no corpus found, training from seed examples only")
-        print("  (ingest will run next and produce a corpus; centroids will be retrained after)")
+        corpus_rows = []
+        print("  Mode: SEED ONLY — no corpus found, training from bootstrap examples only")
 
     # -----------------------------------------------------------------------
     # Build training sets
