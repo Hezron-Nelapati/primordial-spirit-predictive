@@ -179,9 +179,10 @@ pub fn predict_next(
 /// Wider topological coverage produces richer explanatory sequences.
 /// Falls back to the first edge if all targets are leaves.
 fn score_edges_explain(edges: &[WordEdge], graph: &dyn GraphAccess) -> Option<String> {
-    // Fix #3: cache (edge, out_degree) together to avoid a second DB query for the winner.
+    // out_degree() runs SELECT COUNT(*) — O(log N) with the index — instead of
+    // edges_from().len() which deserialises every edge row just to count them.
     let best = edges.iter()
-        .map(|e| (e, graph.edges_from(e.to).len()))
+        .map(|e| (e, graph.out_degree(e.to)))
         .max_by_key(|(_, deg)| *deg);
     best.and_then(|(e, out_degree)| {
         graph.node_by_id(e.to).map(|n| {

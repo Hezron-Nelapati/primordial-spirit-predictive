@@ -85,8 +85,11 @@ class SentenceQueue:
         total = sum(raw_weights)
         weights = [w / total for w in raw_weights]
 
-        arrs = [np.array(e) for e in self._embeddings]
-        blended = sum(w * a for w, a in zip(weights, arrs))
+        # np.stack + dot: single allocation, vectorised multiply-sum —
+        # avoids creating N separate np.array() objects in a Python loop.
+        weights_arr = np.array(weights, dtype=np.float32)
+        stacked     = np.array(self._embeddings, dtype=np.float32)  # (n, dim)
+        blended     = weights_arr @ stacked                          # (dim,)
         return blended.tolist()
 
     def clear(self):

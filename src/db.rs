@@ -211,6 +211,19 @@ impl GraphAccess for GraphDb {
         ).is_ok()
     }
 
+    fn out_degree(&self, id: NodeId) -> usize {
+        // COUNT(*) with the idx_edges_from index is O(log N) — far cheaper
+        // than edges_from().len() which deserialises every edge row.
+        self.conn
+            .query_row(
+                "SELECT COUNT(*) FROM edges WHERE from_id = ?1",
+                [id as i64],
+                |r| r.get::<_, i64>(0),
+            )
+            .map(|n| n as usize)
+            .unwrap_or(0)
+    }
+
     fn all_nodes(&self) -> Vec<WordNode> {
         let mut stmt = match self.conn.prepare(
             "SELECT id, surface, frequency, pos_x, pos_y, pos_z,

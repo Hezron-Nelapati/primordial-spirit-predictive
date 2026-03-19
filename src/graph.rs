@@ -112,6 +112,9 @@ pub trait GraphAccess {
     fn edges_to(&self, to_id: NodeId) -> Vec<WordEdge>;
     /// True if any edge departs from `id` (cheaper than edges_from for boolean check).
     fn has_edges_from(&self, id: NodeId) -> bool;
+    /// Number of outgoing edges from `id` — cheaper than edges_from().len() because
+    /// it avoids deserialising edge data; used by score_edges_explain for ranking.
+    fn out_degree(&self, id: NodeId) -> usize;
     /// All nodes — used for OOV lexical-vector fallback scan.
     fn all_nodes(&self) -> Vec<WordNode>;
     fn node_count(&self) -> usize;
@@ -139,6 +142,9 @@ impl GraphAccess for WordGraph {
     }
     fn has_edges_from(&self, id: NodeId) -> bool {
         self.from_index.get(&id).map(|v| !v.is_empty()).unwrap_or(false)
+    }
+    fn out_degree(&self, id: NodeId) -> usize {
+        self.from_index.get(&id).map(|v| v.len()).unwrap_or(0)
     }
     fn all_nodes(&self) -> Vec<WordNode> {
         self.nodes.values().cloned().collect()

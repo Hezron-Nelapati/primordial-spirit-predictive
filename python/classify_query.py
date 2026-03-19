@@ -171,11 +171,20 @@ def classify(query: str, centroids_path: str = _DEFAULT_CENTROIDS,
     else:
         emb_full = raw_emb.tolist()
 
-    # POS-filtered embeddings (must match train_centroids.py filtering)
+    # POS-filtered texts (must match train_centroids.py filtering)
     intent_text = _pos_filter(query, INTENT_TAGS)
     tone_text   = _pos_filter(query, TONE_TAGS)
-    emb_intent_pos = model.encode(intent_text).tolist()
-    emb_tone_pos   = model.encode(tone_text).tolist()
+    has_domain  = "domain_labels" in store
+
+    # Batch all POS-filtered texts into a single model.encode() call —
+    # one GPU/MPS round-trip instead of 2-3 separate forward passes.
+    if has_domain:
+        domain_text = _pos_filter(query, DOMAIN_TAGS)
+        batch_embs  = model.encode([intent_text, tone_text, domain_text])
+        emb_intent_pos, emb_tone_pos, emb_domain_pos = (e.tolist() for e in batch_embs)
+    else:
+        batch_embs = model.encode([intent_text, tone_text])
+        emb_intent_pos, emb_tone_pos = batch_embs[0].tolist(), batch_embs[1].tolist()
 
     intent = _nearest_blended(
         emb_full, emb_intent_pos,
@@ -188,10 +197,7 @@ def classify(query: str, centroids_path: str = _DEFAULT_CENTROIDS,
         store["tone_labels"],
     )
 
-    # Domain: use centroid model when available; fall back to keyword heuristic.
-    if "domain_labels" in store:
-        domain_text = _pos_filter(query, DOMAIN_TAGS)
-        emb_domain_pos = model.encode(domain_text).tolist()
+    if has_domain:
         domain = _nearest_blended(
             emb_full, emb_domain_pos,
             store["domain_full_centroids"], store["domain_pos_centroids"],

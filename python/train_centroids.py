@@ -251,12 +251,28 @@ def main():
           f"{len(set(domain_labels))} classes → {sorted(set(domain_labels))}")
 
     # -----------------------------------------------------------------------
-    # POS-filtered texts for blended centroid
+    # POS-filtered texts for blended centroid — single-pass cache
+    # Tag each unique sentence once and look up results for all three tag
+    # sets, instead of calling nltk.pos_tag three times per sentence.
     # -----------------------------------------------------------------------
-    print("Extracting POS-filtered texts...", flush=True)
-    intent_pos_texts = [pos_filter(t, INTENT_TAGS) for t in intent_texts]
-    tone_pos_texts   = [pos_filter(t, TONE_TAGS)   for t in tone_texts]
-    domain_pos_texts = [pos_filter(t, DOMAIN_TAGS) for t in domain_texts]
+    print("Extracting POS-filtered texts (single tokenise pass per sentence)...", flush=True)
+    all_unique = list(set(intent_texts) | set(tone_texts) | set(domain_texts))
+    pos_cache: dict = {}
+    for text in all_unique:
+        try:
+            tokens = nltk.word_tokenize(text)
+            tagged = nltk.pos_tag(tokens)
+            pos_cache[text] = (
+                " ".join(w for w, t in tagged if t in INTENT_TAGS) or text,
+                " ".join(w for w, t in tagged if t in TONE_TAGS)   or text,
+                " ".join(w for w, t in tagged if t in DOMAIN_TAGS) or text,
+            )
+        except Exception:
+            pos_cache[text] = (text, text, text)
+
+    intent_pos_texts = [pos_cache[t][0] for t in intent_texts]
+    tone_pos_texts   = [pos_cache[t][1] for t in tone_texts]
+    domain_pos_texts = [pos_cache[t][2] for t in domain_texts]
 
     # -----------------------------------------------------------------------
     # Embeddings

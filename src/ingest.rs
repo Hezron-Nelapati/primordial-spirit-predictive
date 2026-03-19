@@ -1,6 +1,7 @@
 use crate::db::GraphDb;
 use crate::graph::{GraphAccess, WordGraph, WordNode, WordEdge};
 use serde::Deserialize;
+use std::collections::HashMap;
 
 // ---------------------------------------------------------------------------
 // Corpus JSON schema
@@ -100,19 +101,27 @@ pub fn ingest_to_db(db: &GraphDb, rows: Vec<CorpusRow>) {
         eprintln!("[INGEST] WARN: Could not begin transaction: {}. Aborting ingest.", e);
         return;
     }
+    // Cache lexical vectors keyed by surface string — compute_lexical_vector()
+    // is pure and deterministic, so every repeated token (e.g. "the", "is")
+    // reuses the cached result instead of rehashing and re-sorting its chars.
+    let mut lv_cache: HashMap<String, ([f32; 5], [f32; 3])> = HashMap::new();
+
     for row in rows {
         let mut prev_id: Option<u64> = None;
         for token in &row.tokens {
             let id = WordGraph::generate_id(token);
-            let lv  = WordNode::compute_lexical_vector(token);
-            let len = lv[0];
-            let pos = [
-                len,
-                if len > 0.0 { lv[3] / len } else { 0.0 },
-                if len > 0.0 { lv[4] / len } else { 0.0 },
-            ];
+            let (lv, pos) = lv_cache.entry(token.clone()).or_insert_with(|| {
+                let lv  = WordNode::compute_lexical_vector(token);
+                let len = lv[0];
+                let pos = [
+                    len,
+                    if len > 0.0 { lv[3] / len } else { 0.0 },
+                    if len > 0.0 { lv[4] / len } else { 0.0 },
+                ];
+                (lv, pos)
+            });
             let node = WordNode { id, surface: token.clone(), frequency: 1,
-                                  position: pos, lexical_vector: lv };
+                                  position: *pos, lexical_vector: *lv };
             let _ = db.upsert_node(&node);
 
             if let Some(prev) = prev_id {

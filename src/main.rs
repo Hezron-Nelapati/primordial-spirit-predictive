@@ -5,7 +5,7 @@ use spse_predictive::reasoning::{ReasoningModule, SessionalMemory};
 use spse_predictive::spatial::SpatialGrid;
 use spse_predictive::reasoning::{evaluate_arithmetic, extract_year_from_query, is_arithmetic_query};
 use spse_predictive::walk::{compute_depth_limit, is_reachable, predict_next, secondary_signal, WalkConfig, WalkMode};
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use std::fs;
 use std::io::{self, BufRead, Write};
 use std::process::Command;
@@ -222,10 +222,12 @@ fn run_server_mode(db: GraphDb, spatial: SpatialGrid) -> ! {
 
     // Session map: persists ReasoningModule session state across requests.
     // Key = session_id string; value = the accumulated SessionalMemory.
-    // Fix #7: cap at SESSION_CAP entries to prevent unbounded memory growth.
-    // Simple eviction: remove the first (arbitrary) key when cap is exceeded.
+    // SESSION_ORDER tracks insertion order so eviction is FIFO (oldest session
+    // evicted first) rather than the unpredictable HashMap iteration order that
+    // a plain keys().next() eviction produces.
     const SESSION_CAP: usize = 1024;
-    let mut sessions: HashMap<String, SessionalMemory> = HashMap::new();
+    let mut sessions:      HashMap<String, SessionalMemory> = HashMap::new();
+    let mut session_order: VecDeque<String>                 = VecDeque::new();
 
     let stdin = io::stdin();
     for line in stdin.lock().lines() {
@@ -242,13 +244,14 @@ fn run_server_mode(db: GraphDb, spatial: SpatialGrid) -> ! {
             Ok(req) => {
                 let prior_session = sessions.remove(&req.session_id).unwrap_or_else(SessionalMemory::new);
                 let (answer, updated_session) = handle_server_request(&req, &db, &spatial, prior_session);
-                // Evict one entry when the cap is reached to bound memory use.
+                // FIFO eviction: pop the oldest session when cap is reached.
                 if sessions.len() >= SESSION_CAP {
-                    if let Some(oldest_key) = sessions.keys().next().cloned() {
+                    if let Some(oldest_key) = session_order.pop_front() {
                         sessions.remove(&oldest_key);
                     }
                 }
                 sessions.insert(req.session_id.clone(), updated_session);
+                session_order.push_back(req.session_id.clone());
                 let error = answer.starts_with("System Fault");
                 ServerResponse { answer, error }
             }
