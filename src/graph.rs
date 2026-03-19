@@ -64,6 +64,9 @@ pub struct WordGraph {
     pub nodes: HashMap<NodeId, WordNode, Fnv1aBuildHasher>,
     pub edges: Vec<WordEdge>,
     pub by_surface: HashMap<String, NodeId, Fnv1aBuildHasher>,
+    // Fix #10: index maps for O(degree) edge lookups instead of O(E) linear scans.
+    from_index: HashMap<NodeId, Vec<usize>, Fnv1aBuildHasher>,
+    to_index:   HashMap<NodeId, Vec<usize>, Fnv1aBuildHasher>,
 }
 
 impl WordGraph {
@@ -72,7 +75,17 @@ impl WordGraph {
             nodes: HashMap::with_capacity_and_hasher(10_000, Fnv1aBuildHasher::default()),
             edges: Vec::with_capacity(50_000),
             by_surface: HashMap::with_capacity_and_hasher(10_000, Fnv1aBuildHasher::default()),
+            from_index: HashMap::with_capacity_and_hasher(10_000, Fnv1aBuildHasher::default()),
+            to_index:   HashMap::with_capacity_and_hasher(10_000, Fnv1aBuildHasher::default()),
         }
+    }
+
+    /// Push an edge and keep both index maps consistent.
+    pub fn push_edge(&mut self, edge: WordEdge) {
+        let idx = self.edges.len();
+        self.from_index.entry(edge.from).or_default().push(idx);
+        self.to_index.entry(edge.to).or_default().push(idx);
+        self.edges.push(edge);
     }
 
     pub fn generate_id(word: &str) -> NodeId {
@@ -113,13 +126,19 @@ impl GraphAccess for WordGraph {
         self.nodes.get(&id).cloned()
     }
     fn edges_from(&self, from_id: NodeId) -> Vec<WordEdge> {
-        self.edges.iter().filter(|e| e.from == from_id).cloned().collect()
+        // Fix #10: use index map for O(degree) lookup instead of O(E) scan.
+        self.from_index.get(&from_id)
+            .map(|idxs| idxs.iter().map(|&i| self.edges[i].clone()).collect())
+            .unwrap_or_default()
     }
     fn edges_to(&self, to_id: NodeId) -> Vec<WordEdge> {
-        self.edges.iter().filter(|e| e.to == to_id).cloned().collect()
+        // Fix #10: use index map for O(degree) lookup instead of O(E) scan.
+        self.to_index.get(&to_id)
+            .map(|idxs| idxs.iter().map(|&i| self.edges[i].clone()).collect())
+            .unwrap_or_default()
     }
     fn has_edges_from(&self, id: NodeId) -> bool {
-        self.edges.iter().any(|e| e.from == id)
+        self.from_index.get(&id).map(|v| !v.is_empty()).unwrap_or(false)
     }
     fn all_nodes(&self) -> Vec<WordNode> {
         self.nodes.values().cloned().collect()

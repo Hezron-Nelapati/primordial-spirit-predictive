@@ -64,7 +64,10 @@ def _pos_filter(text: str, tag_set: set) -> str:
     tokens = nltk.word_tokenize(text)
     tagged = nltk.pos_tag(tokens)
     words  = [w for w, t in tagged if t in tag_set]
-    return " ".join(words) if words else text
+    # Fix #12: return empty string instead of full text when no matching tokens
+    # exist.  Returning text here caused the POS-filtered embedding to equal the
+    # full embedding, making the 0.3 blend weight completely meaningless.
+    return " ".join(words)
 
 
 def _euclidean(a: list, b: list) -> float:
@@ -106,6 +109,15 @@ def _get_store(centroids_path: str = _DEFAULT_CENTROIDS) -> dict:
         with open(centroids_path) as f:
             _store = json.load(f)
     return _store
+
+
+def reset_store() -> None:
+    """Invalidate the cached centroids so the next classify() call reloads from disk.
+    Call this after training completes to pick up the new centroids.json without
+    restarting the process."""
+    global _store
+    _store = None
+    print("  [classify_query]: centroids cache invalidated.", file=sys.stderr)
 
 
 def _get_nlp():
@@ -207,7 +219,9 @@ if __name__ == "__main__":
         sys.exit(1)
 
     query_text     = sys.argv[1]
-    centroids_path = "data/centroids.json"
+    # Fix #13: use the absolute _DEFAULT_CENTROIDS path (avoids CWD-dependent
+    # relative-path breakage when called from a different working directory).
+    centroids_path = _DEFAULT_CENTROIDS
     session_id     = None
 
     # Parse optional positional centroids_path and --session-id flag

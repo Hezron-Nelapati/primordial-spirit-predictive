@@ -3,3 +3,4 @@ data/graph.db
 __pycache__/
 *.pyc
 .env
+.flask_secret

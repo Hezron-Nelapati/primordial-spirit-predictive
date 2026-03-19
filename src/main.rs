@@ -221,6 +221,9 @@ fn run_server_mode(db: GraphDb, spatial: SpatialGrid) -> ! {
 
     // Session map: persists ReasoningModule session state across requests.
     // Key = session_id string; value = the accumulated SessionalMemory.
+    // Fix #7: cap at SESSION_CAP entries to prevent unbounded memory growth.
+    // Simple eviction: remove the first (arbitrary) key when cap is exceeded.
+    const SESSION_CAP: usize = 1024;
     let mut sessions: HashMap<String, SessionalMemory> = HashMap::new();
 
     let stdin = io::stdin();
@@ -238,6 +241,12 @@ fn run_server_mode(db: GraphDb, spatial: SpatialGrid) -> ! {
             Ok(req) => {
                 let prior_session = sessions.remove(&req.session_id).unwrap_or_else(SessionalMemory::new);
                 let (answer, updated_session) = handle_server_request(&req, &db, &spatial, prior_session);
+                // Evict one entry when the cap is reached to bound memory use.
+                if sessions.len() >= SESSION_CAP {
+                    if let Some(oldest_key) = sessions.keys().next().cloned() {
+                        sessions.remove(&oldest_key);
+                    }
+                }
                 sessions.insert(req.session_id.clone(), updated_session);
                 let error = answer.starts_with("System Fault");
                 ServerResponse { answer, error }
@@ -264,13 +273,21 @@ fn main() {
     let server_mode = args.iter().any(|a| a == "--server");
 
     if !server_mode {
-        // Count only positional args (ignore --flag pairs)
+        // Count only positional args.
+        // Fix #6: distinguish flags that consume a value argument (e.g. --session-id)
+        // from flags that stand alone (e.g. --server). A blind skip_next for every
+        // "--" prefix was incorrectly treating --server as a valued flag.
+        const VALUED_FLAGS: &[&str] = &["--session-id"];
         let positional_count = {
             let mut count = 0usize;
             let mut skip_next = false;
             for a in args.iter().skip(1) {
                 if skip_next { skip_next = false; continue; }
-                if a.starts_with("--") { skip_next = true; } else { count += 1; }
+                if a.starts_with("--") {
+                    if VALUED_FLAGS.contains(&a.as_str()) { skip_next = true; }
+                } else {
+                    count += 1;
+                }
             }
             count
         };

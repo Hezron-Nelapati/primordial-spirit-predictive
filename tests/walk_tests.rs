@@ -33,7 +33,7 @@ fn build_chain(
         });
 
         if let Some(prev) = prev_id {
-            graph.edges.push(WordEdge {
+            graph.push_edge(WordEdge {
                 from: prev,
                 to: id,
                 weight: 1.0,
@@ -146,13 +146,13 @@ fn test_predict_next_intent_bias_selects_correct_branch() {
     }
 
     // Edge to "closes": weight 1.0, intent = "statement" (will be ×2 when session = statement)
-    graph.edges.push(WordEdge {
+    graph.push_edge(WordEdge {
         from: src_id, to: yes_id, weight: 1.0,
         intent: "statement".to_string(), tone: "neutral".to_string(),
         domain: "finance".to_string(), entity: None, dated: None,
     });
     // Edge to "opens": weight 1.0, intent = "question" (no multiplier when session = statement)
-    graph.edges.push(WordEdge {
+    graph.push_edge(WordEdge {
         from: src_id, to: no_id, weight: 1.0,
         intent: "question".to_string(), tone: "neutral".to_string(),
         domain: "finance".to_string(), entity: None, dated: None,
@@ -186,12 +186,12 @@ fn test_predict_next_domain_bias_selects_correct_branch() {
         });
     }
 
-    graph.edges.push(WordEdge {
+    graph.push_edge(WordEdge {
         from: src_id, to: tech_id, weight: 1.0,
         intent: "statement".to_string(), tone: "neutral".to_string(),
         domain: "tech".to_string(), entity: None, dated: None,
     });
-    graph.edges.push(WordEdge {
+    graph.push_edge(WordEdge {
         from: src_id, to: sci_id, weight: 1.0,
         intent: "statement".to_string(), tone: "neutral".to_string(),
         domain: "science".to_string(), entity: None, dated: None,
@@ -225,13 +225,13 @@ fn test_predict_next_temporal_bias_prefers_closer_year() {
         });
     }
 
-    graph.edges.push(WordEdge {
+    graph.push_edge(WordEdge {
         from: src_id, to: recent_id, weight: 1.0,
         intent: "statement".to_string(), tone: "neutral".to_string(),
         domain: "tech".to_string(), entity: None,
         dated: Some(2025),
     });
-    graph.edges.push(WordEdge {
+    graph.push_edge(WordEdge {
         from: src_id, to: old_id, weight: 1.0,
         intent: "statement".to_string(), tone: "neutral".to_string(),
         domain: "tech".to_string(), entity: None,
@@ -401,7 +401,7 @@ fn test_predict_next_tier2_routes_via_nearby_node() {
     }
 
     // Only anchor → result edge; orphan has no outgoing edges.
-    graph.edges.push(WordEdge {
+    graph.push_edge(WordEdge {
         from: anchor_id, to: result_id, weight: 1.0,
         intent: "statement".to_string(), tone: "neutral".to_string(),
         domain: "general".to_string(), entity: None, dated: None,
@@ -458,7 +458,7 @@ fn test_predict_next_tier2_centroid_shifts_search_origin() {
             lexical_vector: WordNode::compute_lexical_vector(word),
         });
     }
-    graph.edges.push(WordEdge {
+    graph.push_edge(WordEdge {
         from: anchor_id, to: result_id, weight: 1.0,
         intent: "statement".to_string(), tone: "neutral".to_string(),
         domain: "general".to_string(), entity: None, dated: None,
@@ -509,7 +509,7 @@ fn test_is_reachable_returns_false_when_unreachable() {
                 lexical_vector: WordNode::compute_lexical_vector(w),
             });
         }
-        graph.edges.push(WordEdge {
+        graph.push_edge(WordEdge {
             from: fid, to: tid, weight: 1.0,
             intent: "statement".to_string(), tone: "neutral".to_string(),
             domain: "general".to_string(), entity: None, dated: None,
@@ -580,7 +580,7 @@ fn test_compute_depth_limit_moderate_hub_returns_2() {
     let hub_id = WordGraph::generate_id("hub");
     for tok in &["a1", "a2", "a3", "a4", "a5", "a6"] {
         let to_id = WordGraph::generate_id(tok);
-        graph.edges.push(WordEdge {
+        graph.push_edge(WordEdge {
             from: hub_id, to: to_id, weight: 1.0,
             intent: "statement".to_string(), tone: "neutral".to_string(),
             domain: "general".to_string(), entity: None, dated: None,
@@ -670,13 +670,13 @@ fn test_resolve_start_node_prefers_temporally_close_source() {
     let server_id = WordGraph::generate_id("server");
 
     // old_start → server (dated 2010)
-    graph.edges.push(WordEdge {
+    graph.push_edge(WordEdge {
         from: old_id, to: server_id, weight: 1.0,
         intent: "statement".to_string(), tone: "neutral".to_string(),
         domain: "tech".to_string(), entity: None, dated: Some(2010),
     });
     // new_start → server (dated 2026)
-    graph.edges.push(WordEdge {
+    graph.push_edge(WordEdge {
         from: new_id, to: server_id, weight: 1.0,
         intent: "statement".to_string(), tone: "neutral".to_string(),
         domain: "tech".to_string(), entity: None, dated: Some(2026),
@@ -914,13 +914,13 @@ fn test_predict_next_tier3_reroutes_via_ancestor() {
     let alt_id      = WordGraph::generate_id("alt");
 
     // anchor → dead_end
-    graph.edges.push(WordEdge {
+    graph.push_edge(WordEdge {
         from: anchor_id, to: dead_end_id, weight: 1.0,
         intent: "statement".to_string(), tone: "neutral".to_string(),
         domain: "general".to_string(), entity: None, dated: None,
     });
     // anchor → alt  (the reroute target)
-    graph.edges.push(WordEdge {
+    graph.push_edge(WordEdge {
         from: anchor_id, to: alt_id, weight: 1.0,
         intent: "statement".to_string(), tone: "neutral".to_string(),
         domain: "general".to_string(), entity: None, dated: None,
@@ -955,12 +955,12 @@ fn test_predict_next_tier3_does_not_loop_back_to_dead_end() {
     let dead_end_id = WordGraph::generate_id("dead_end");
     let forward_id  = WordGraph::generate_id("forward");
 
-    graph.edges.push(WordEdge {
+    graph.push_edge(WordEdge {
         from: src_id, to: dead_end_id, weight: 2.0, // heavier — must still be excluded
         intent: "statement".to_string(), tone: "neutral".to_string(),
         domain: "general".to_string(), entity: None, dated: None,
     });
-    graph.edges.push(WordEdge {
+    graph.push_edge(WordEdge {
         from: src_id, to: forward_id, weight: 1.0,
         intent: "statement".to_string(), tone: "neutral".to_string(),
         domain: "general".to_string(), entity: None, dated: None,
@@ -1059,13 +1059,13 @@ fn test_predict_next_explain_mode_prefers_high_out_degree() {
     let hub_id  = WordGraph::generate_id("hub");
 
     // src → leaf  (weight 2.0 — heavier, but leaf is a dead-end)
-    graph.edges.push(WordEdge {
+    graph.push_edge(WordEdge {
         from: src_id, to: leaf_id, weight: 2.0,
         intent: "explain".to_string(), tone: "neutral".to_string(),
         domain: "science".to_string(), entity: None, dated: None,
     });
     // src → hub  (weight 1.0 — lighter, but hub has 3 onward edges)
-    graph.edges.push(WordEdge {
+    graph.push_edge(WordEdge {
         from: src_id, to: hub_id, weight: 1.0,
         intent: "explain".to_string(), tone: "neutral".to_string(),
         domain: "science".to_string(), entity: None, dated: None,
@@ -1073,7 +1073,7 @@ fn test_predict_next_explain_mode_prefers_high_out_degree() {
     // hub → a, hub → b, hub → c
     for tok in &["a", "b", "c"] {
         let to_id = WordGraph::generate_id(tok);
-        graph.edges.push(WordEdge {
+        graph.push_edge(WordEdge {
             from: hub_id, to: to_id, weight: 1.0,
             intent: "explain".to_string(), tone: "neutral".to_string(),
             domain: "science".to_string(), entity: None, dated: None,
@@ -1113,18 +1113,18 @@ fn test_predict_next_question_mode_routes_toward_entity_anchor() {
     let answer_id = WordGraph::generate_id("answer");
 
     // src → near → answer  (2 hops total; near is 1 hop from answer)
-    graph.edges.push(WordEdge {
+    graph.push_edge(WordEdge {
         from: src_id, to: near_id, weight: 1.0,
         intent: "question".to_string(), tone: "neutral".to_string(),
         domain: "general".to_string(), entity: None, dated: None,
     });
-    graph.edges.push(WordEdge {
+    graph.push_edge(WordEdge {
         from: near_id, to: answer_id, weight: 1.0,
         intent: "question".to_string(), tone: "neutral".to_string(),
         domain: "general".to_string(), entity: None, dated: None,
     });
     // src → far  (dead-end, no path to answer)
-    graph.edges.push(WordEdge {
+    graph.push_edge(WordEdge {
         from: src_id, to: far_id, weight: 2.0, // heavier weight — must still lose
         intent: "question".to_string(), tone: "neutral".to_string(),
         domain: "general".to_string(), entity: None, dated: None,
@@ -1174,7 +1174,7 @@ fn test_tier3_question_astar_bridge_jumps_to_entity() {
         });
     }
     // entity → next (gives entity an outgoing edge so the bridge is accepted)
-    graph.edges.push(WordEdge {
+    graph.push_edge(WordEdge {
         from: WordGraph::generate_id("entity"),
         to:   WordGraph::generate_id("next"),
         weight: 1.0,
@@ -1199,32 +1199,39 @@ fn test_tier3_question_astar_bridge_jumps_to_entity() {
 fn test_tier3_astar_bridge_inactive_in_forward_mode() {
     let mut graph = WordGraph::new();
 
-    for tok in &["src", "alt", "entity"] {
+    // src and alt are co-located at [1,1,1]. entity and entity_child are far
+    // away at [10,10,10] — outside the Tier-2 KD-tree radius of 3.0, so Tier 2
+    // cannot accidentally pick up entity_child. This isolates the test to verify
+    // only that the A* bridge is inactive in Forward mode.
+    let near_pos: [f32; 3] = [1.0; 3];
+    let far_pos:  [f32; 3] = [10.0; 3];
+
+    for (tok, pos) in &[("src", near_pos), ("alt", near_pos), ("entity", far_pos)] {
         let id = WordGraph::generate_id(tok);
         graph.by_surface.insert(tok.to_string(), id);
         graph.nodes.entry(id).or_insert(WordNode {
             id, surface: tok.to_string(), frequency: 1,
-            position: [1.0; 3],
+            position: *pos,
             lexical_vector: WordNode::compute_lexical_vector(tok),
         });
     }
     // src ← alt  (alt is ancestor of src, has forward edge to "alt" but not entity)
-    graph.edges.push(WordEdge {
+    graph.push_edge(WordEdge {
         from: WordGraph::generate_id("alt"),
         to:   WordGraph::generate_id("src"),
         weight: 1.0,
         intent: "statement".to_string(), tone: "neutral".to_string(),
         domain: "general".to_string(), entity: None, dated: None,
     });
-    // entity → entity_child
+    // entity → entity_child (both far away at far_pos)
     let eid = WordGraph::generate_id("entity");
     let eid2 = WordGraph::generate_id("entity_child");
     graph.by_surface.insert("entity_child".to_string(), eid2);
     graph.nodes.entry(eid2).or_insert(WordNode {
         id: eid2, surface: "entity_child".to_string(), frequency: 1,
-        position: [5.0; 3], lexical_vector: WordNode::compute_lexical_vector("entity_child"),
+        position: far_pos, lexical_vector: WordNode::compute_lexical_vector("entity_child"),
     });
-    graph.edges.push(WordEdge {
+    graph.push_edge(WordEdge {
         from: eid, to: eid2, weight: 1.0,
         intent: "statement".to_string(), tone: "neutral".to_string(),
         domain: "general".to_string(), entity: None, dated: None,
@@ -1237,11 +1244,11 @@ fn test_tier3_astar_bridge_inactive_in_forward_mode() {
 
     // "src" is a dead-end. Forward mode must use classic backtrack (ancestor = alt).
     let result = predict_next("src", &graph, Some(&spatial), &reasoning, &config, &[]);
-    // The bridge is NOT active in Forward mode; classic backtrack returns alt (only ancestor with alt edge but alt→src is the only edge, alt has no *other* forward edges here).
-    // The ancestor of src is alt; alt has edges only to src; tier3_edges will be empty → None.
-    // That's fine — the important assertion is that the bridge didn't jump to entity_child.
+    // The A* bridge is NOT active in Forward mode; entity_child is in a far cluster
+    // (Tier-2 radius 3.0 cannot reach it), so it must not appear in the result.
     assert_ne!(result.as_deref(), Some("entity_child"), "A* bridge must not activate in Forward mode");
 }
+
 
 // ---------------------------------------------------------------------------
 // extract_year_from_query — Phase 15

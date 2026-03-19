@@ -1,4 +1,4 @@
-use crate::graph::{GraphAccess, WordEdge};
+use crate::graph::{GraphAccess, NodeId, WordEdge};
 use crate::reasoning::ReasoningModule;
 use crate::spatial::SpatialGrid;
 use std::collections::{HashSet, VecDeque};
@@ -54,19 +54,28 @@ pub fn predict_next(
             eprintln!("⚡ Triggering 5-Dimensional Lexical Vector Fallback...");
             let target_vec = crate::graph::WordNode::compute_lexical_vector(current_word);
             let mut best_dist = f32::MAX;
-            let mut best_id = 0u64;
+            // Fix #1: initialise as Option so we can detect empty-graph case.
+            let mut best_id: Option<u64> = None;
             let mut nearest_str = String::new();
 
             for node in graph.all_nodes() {
                 let dist = euclidean_dist_5(&node.lexical_vector, &target_vec);
                 if dist < best_dist {
                     best_dist = dist;
-                    best_id = node.id;
+                    best_id = Some(node.id);
                     nearest_str = node.surface.clone();
                 }
             }
-            eprintln!("✅ Successfully snapped OOV onto geometric structural neighbor: [{}]", nearest_str);
-            best_id
+            match best_id {
+                Some(id) => {
+                    eprintln!("✅ Successfully snapped OOV onto geometric structural neighbor: [{}]", nearest_str);
+                    id
+                }
+                None => {
+                    eprintln!("❌ OOV Fallback: graph is empty — cannot resolve '{}'", current_word);
+                    return None;
+                }
+            }
         }
     };
 
@@ -107,10 +116,13 @@ pub fn predict_next(
 
         let neighbours = grid.query_radius(search_pos, 3.0);
         let mut tier2_edges: Vec<WordEdge> = Vec::new();
-        for &nb_id in &neighbours {
-            if nb_id != current_id {
-                tier2_edges.extend(graph.edges_from(nb_id));
-            }
+        // Fix #4: deduplicate neighbour IDs before querying edges to avoid
+        // spurious upweighting from duplicate entries in the KD-tree result.
+        let unique_neighbours: HashSet<NodeId> = neighbours.iter().copied()
+            .filter(|&nb_id| nb_id != current_id)
+            .collect();
+        for nb_id in &unique_neighbours {
+            tier2_edges.extend(graph.edges_from(*nb_id));
         }
 
         if !tier2_edges.is_empty() {
@@ -167,10 +179,11 @@ pub fn predict_next(
 /// Wider topological coverage produces richer explanatory sequences.
 /// Falls back to the first edge if all targets are leaves.
 fn score_edges_explain(edges: &[WordEdge], graph: &dyn GraphAccess) -> Option<String> {
-    // Cache outgoing edge counts to avoid a second SQL query for the winner.
-    let best = edges.iter().max_by_key(|e| graph.edges_from(e.to).len());
-    best.and_then(|e| {
-        let out_degree = graph.edges_from(e.to).len();
+    // Fix #3: cache (edge, out_degree) together to avoid a second DB query for the winner.
+    let best = edges.iter()
+        .map(|e| (e, graph.edges_from(e.to).len()))
+        .max_by_key(|(_, deg)| *deg);
+    best.and_then(|(e, out_degree)| {
         graph.node_by_id(e.to).map(|n| {
             eprintln!("      [EXPLAIN_MODE] Selected node [{}] with {} onward edges (widest coverage).",
                 n.surface, out_degree);
@@ -367,6 +380,8 @@ pub fn resolve_start_node(
 
         if let Some(edge) = best_prev {
             let prev_surface = graph.node_by_id(edge.from).map(|n| n.surface).unwrap_or_default();
+            // Fix #2: check punctuation BEFORE updating current_id so we never
+            // land on a sentence-boundary node as the returned start node.
             if prev_surface == "." || prev_surface == "?" || prev_surface == "!" {
                 break;
             }

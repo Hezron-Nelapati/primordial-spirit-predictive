@@ -69,7 +69,7 @@ pub fn ingest_v2_rows(graph: &mut WordGraph, rows: Vec<V2JsonData>) {
                 if let Some(edge) = existing {
                     edge.weight += 1.0;
                 } else {
-                    graph.edges.push(WordEdge {
+                    graph.push_edge(WordEdge {
                         from: prev,
                         to: id,
                         weight: 1.0,
@@ -94,7 +94,12 @@ pub fn ingest_v2_rows(graph: &mut WordGraph, rows: Vec<V2JsonData>) {
 /// Wraps the entire batch in a single transaction for throughput — avoids
 /// one fsync per row which would be orders of magnitude slower on large corpora.
 pub fn ingest_v2_to_db(db: &GraphDb, rows: Vec<V2JsonData>) {
-    let _ = db.begin();
+    // Fix #9: propagate begin/commit errors rather than silently discarding.
+    // If BEGIN fails (e.g. database locked), abort before writing any rows.
+    if let Err(e) = db.begin() {
+        eprintln!("[INGEST] WARN: Could not begin transaction: {}. Aborting ingest.", e);
+        return;
+    }
     for row in rows {
         let mut prev_id: Option<u64> = None;
         for token in &row.tokens {
@@ -121,7 +126,9 @@ pub fn ingest_v2_to_db(db: &GraphDb, rows: Vec<V2JsonData>) {
             prev_id = Some(id);
         }
     }
-    let _ = db.commit();
+    if let Err(e) = db.commit() {
+        eprintln!("[INGEST] WARN: Could not commit transaction: {}. Changes may be lost.", e);
+    }
 }
 
 /// Ingest every non-empty line of `text` as an independent sentence.
@@ -163,7 +170,7 @@ pub fn ingest_sentence(graph: &mut WordGraph, sentence: &str, base_weight: f32) 
             if let Some(edge) = graph.edges.iter_mut().find(|e| e.from == prev && e.to == id) {
                 edge.weight += base_weight;
             } else {
-                graph.edges.push(WordEdge {
+                graph.push_edge(WordEdge {
                     from: prev,
                     to: id,
                     weight: base_weight,

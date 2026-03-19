@@ -26,7 +26,23 @@ import json, os, re, secrets, subprocess, sys, threading, time
 from flask import Flask, Response, jsonify, render_template, request, session
 
 app = Flask(__name__)
-app.secret_key = os.environ.get("FLASK_SECRET", secrets.token_hex(32))
+
+# Fix #19: persist the Flask secret to a local file so sessions survive server
+# restarts. Generate a new secret only if the file doesn't exist yet.
+_SECRET_FILE = os.path.join(ROOT, ".flask_secret")
+if os.environ.get("FLASK_SECRET"):
+    app.secret_key = os.environ["FLASK_SECRET"]
+elif os.path.isfile(_SECRET_FILE):
+    with open(_SECRET_FILE) as _f:
+        app.secret_key = _f.read().strip()
+else:
+    _new_secret = secrets.token_hex(32)
+    try:
+        with open(_SECRET_FILE, "w") as _f:
+            _f.write(_new_secret)
+    except OSError:
+        pass  # non-critical; session loss only if file cannot be written
+    app.secret_key = _new_secret
 
 ROOT       = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
 PYTHON_DIR = os.path.join(ROOT, "python")
@@ -86,10 +102,13 @@ def _start_rust():
             cwd=ROOT,
             bufsize=1,                # line-buffered
         )
-        # Forward Rust stderr to our own stdout so it appears in Docker logs.
+        # Fix #16: drain Rust stderr in a background thread as fast as possible
+        # to prevent the OS pipe buffer (~64 KB) from filling, which would cause
+        # Rust to block indefinitely on eprintln!.
         def _fwd_stderr():
             for line in iter(_rust_proc.stderr.readline, ""):
-                print(f"[RUST] {line}", end="", flush=True)
+                sys.stdout.write(f"[RUST] {line}")
+                sys.stdout.flush()
         threading.Thread(target=_fwd_stderr, daemon=True).start()
 
         # Wait for READY signal (DB built + spatial index ready).
@@ -125,11 +144,27 @@ def _query_rust(payload: dict) -> dict:
             line = json.dumps(payload) + "\n"
             _rust_proc.stdin.write(line)
             _rust_proc.stdin.flush()
-            resp_line = _rust_proc.stdout.readline()
-            if not resp_line:
+            # Fix #17: use a threading.Timer sentinel to enforce a 30-second
+            # timeout on readline() so a hung Rust process cannot hold the lock
+            # forever and block all subsequent Flask requests.
+            resp_line = [None]
+            def _do_read():
+                try:
+                    resp_line[0] = _rust_proc.stdout.readline()
+                except Exception:
+                    resp_line[0] = ""
+            reader = threading.Thread(target=_do_read, daemon=True)
+            reader.start()
+            reader.join(timeout=30)
+            if reader.is_alive():
+                # Rust is not responding — mark unavailable.
+                _rust_ready = False
+                return {"answer": "Graph engine timed out.", "error": True}
+            raw = resp_line[0]
+            if not raw:
                 _rust_ready = False
                 return {"answer": "Graph engine disconnected.", "error": True}
-            return json.loads(resp_line.strip())
+            return json.loads(raw.strip())
         except Exception as exc:
             _rust_ready = False
             return {"answer": f"Graph engine IPC error: {exc}", "error": True}
@@ -230,6 +265,10 @@ def query():
     q = (data.get("query") or "").strip()
     if not q:
         return jsonify({"answer": "Please enter a message.", "error": True}), 400
+    # Fix #20: reject oversized inputs to prevent OOM / DoS from large payloads
+    # being passed through the sentence-transformer and Rust IPC.
+    if len(q) > 2000:
+        return jsonify({"answer": "Query too long (max 2000 characters).", "error": True}), 400
     return jsonify(_run_query(q, _session_id()))
 
 
@@ -261,6 +300,27 @@ def train_start():
             _tstate["done"]    = True
             if proc.returncode != 0:
                 _tstate["error"] = f"Pipeline exited with code {proc.returncode}"
+        # Fix #18: invalidate stale centroids cache and restart Rust so the new
+        # graph DB and centroids are used immediately — without this, the old
+        # process keeps serving the deleted graph.db until the server restarts.
+        if proc.returncode == 0:
+            try:
+                import classify_query as _cq
+                _cq.reset_store()
+                print("[FLASK] Centroids cache invalidated after training.", flush=True)
+            except Exception as exc:
+                print(f"[FLASK] Could not reset centroids cache: {exc}", flush=True)
+            print("[FLASK] Restarting Rust graph engine with new corpus...", flush=True)
+            global _rust_proc, _rust_ready
+            if _rust_proc is not None:
+                try:
+                    _rust_proc.terminate()
+                    _rust_proc.wait(timeout=10)
+                except Exception:
+                    pass
+            _rust_ready = False
+            _rust_proc = None
+            _start_rust()
 
     threading.Thread(target=_run, daemon=True).start()
     return jsonify({"ok": True, "passes": passes})

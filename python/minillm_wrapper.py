@@ -61,8 +61,16 @@ def style(graph_fact: str, user_prompt: str) -> str:
         ]
         tokenizer = pipe.tokenizer
         prompt    = tokenizer.apply_chat_template(messages, tokenize=False, add_generation_prompt=True)
-        outputs   = pipe(prompt, max_new_tokens=40, do_sample=False, temperature=0.0)
-        return outputs[0]["generated_text"].split("<|im_start|>assistant\n")[-1].strip()
+        # Fix #14: decode only the newly generated tokens rather than splitting on
+        # a hard-coded chat-template marker that may change with model updates.
+        prompt_ids = tokenizer(prompt, return_tensors="pt")["input_ids"]
+        prompt_len = prompt_ids.shape[-1]
+        # Fix #15: remove temperature=0.0 — it is ignored when do_sample=False and
+        # only creates confusion for future readers.
+        outputs = pipe(prompt, max_new_tokens=40, do_sample=False)
+        full_ids = tokenizer(outputs[0]["generated_text"], return_tensors="pt")["input_ids"]
+        new_ids  = full_ids[0, prompt_len:]
+        return tokenizer.decode(new_ids, skip_special_tokens=True).strip()
     except Exception as exc:
         print(f"  [miniLLM_WRAPPER]: style() failed ({exc}) — returning raw fact.", file=sys.stderr)
         return graph_fact
