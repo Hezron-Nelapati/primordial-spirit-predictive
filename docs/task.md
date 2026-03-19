@@ -69,7 +69,8 @@ All six modules: `graph`, `reasoning`, `walk`, `classify`, `spatial`, `ingest`.
 - `compute_depth_limit()` — 2-hop topology count → dynamic sentence depth (1–4).
 - `secondary_signal()` — scans query tokens for a secondary graph-resident entity signal.
 - `is_arithmetic_query()` — Guardrail 6; two-condition gate (numeric token + arithmetic signal).
-- Status: **All three tiers implemented and wired. All guardrails active.**
+- `evaluate_arithmetic()` — Phase 12; native Rust arithmetic evaluator; binary ops (`+`,`-`,`*`,`/`,`%`), unary ops (`sqrt`, `squared`, `cubed`), fold ops (`sum`, `product`); division-by-zero and negative-sqrt handled.
+- Status: **All three tiers implemented and wired. All guardrails active. Arithmetic computed natively.**
 
 ### `src/classify.rs`
 - `Classifier::load(path)`, `Classifier::intent(emb_full, emb_pos)`, `Classifier::tone(...)`, `Classifier::domain(...)`.
@@ -219,7 +220,7 @@ Status: **Resolved — V1 surface rewritten or removed**
 - [x] `tests/walk_tests.rs` — 55 tests (walk routing, guardrails, spatial, Tier 1/2/3, secondary-signal, arithmetic-guard, reset_session, WalkMode)
 - [x] `tests/ingest_tests.rs` — 18 tests (sentence/text ingest, edge reinforcement, `ingest_v2_rows`, node position population)
 - [x] `tests/classify_tests.rs` — 6 tests (centroid load, intent/tone labels, determinism)
-- [x] `cargo test` passes (82/82 across all suites, zero warnings)
+- [x] `cargo test` passes (97/97 across all suites, zero warnings)
 
 ### Phase 5: Architecture Docs and Guardrail Design
 Status: **All guardrails and all three routing tiers implemented and wired**
@@ -251,6 +252,18 @@ Status: **Complete — bridge wired with graceful fallback**
 - [x] Rust `classify_query()` subprocess bridge wired into CLI path
 - [x] ML-classified intent/tone/domain drives session context in CLI mode
 - [x] Fallback to user-supplied domain + safe defaults when Python unavailable
+
+### Phase 12: Arithmetic Computation (implementation_plan.md §3C)
+Status: **Complete**
+
+`architecture_ideas.md §7.2` and `implementation_plan.md §3C` specify that arithmetic queries should be *computed natively in Rust* rather than aborted.  Previously Guardrail 6 issued "System Fault: structural abort."
+
+- [x] `evaluate_arithmetic()` added to `walk.rs` — parses query tokens for numbers and operators; supports binary ops (`+`, `-`, `*`, `/`, `%` and word forms), unary ops (`sqrt`, `squared`, `cubed`), and multi-number fold ops (`sum`, `product`)
+- [x] Division-by-zero and negative-sqrt handled with descriptive fallback strings
+- [x] Integer vs float formatting: `"The answer is 42."` (not `42.0000`)
+- [x] Guardrail 6 in `main.rs` CLI path upgraded: calls `evaluate_arithmetic()` instead of aborting; falls back to "couldn't parse" only when no numbers found
+- [x] 15 new tests in `walk_tests.rs` (binary ops, fractional, division-by-zero, sqrt, squared, cubed, sum, product, no-number, single-number-no-op)
+- [x] `evaluate_arithmetic` exported from `walk.rs` and imported in `main.rs`
 
 ### Phase 8: Intent-Polymorphic Walk Strategies
 Status: **Complete**
@@ -327,6 +340,6 @@ The `implementation_plan.md` specifies a Sentence Queue to prevent embedding qua
 - **Working path**: `python/v2_ingest.py` → `data/v2_graph_edges.json` → `cargo run`
 - **`cargo run`**: passes — 5 demo scenarios, zero warnings
 - **`cargo run -- "query" entity domain [year]`**: passes — classifier and LLM bridge both degrade gracefully when Python packages absent
-- **`cargo test`**: 82/82 pass across all suites (55 walk + 18 ingest + 9 classify), zero warnings
+- **`cargo test`**: 97/97 pass across all suites (70 walk + 18 ingest + 9 classify), zero warnings
 - **V3/RAG**: Rust load path ready; Python scripts ready; only data generation step missing
 - **Full pipeline** (when packages installed): `classify_query.py` → intent/tone/domain → `walk.rs` Tier 1 → `minillm_wrapper.py` → styled response

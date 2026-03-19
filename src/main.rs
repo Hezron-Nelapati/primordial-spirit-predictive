@@ -2,7 +2,7 @@ use spse_predictive::graph::WordGraph;
 use spse_predictive::ingest::{ingest_v2_rows, V2JsonData};
 use spse_predictive::reasoning::ReasoningModule;
 use spse_predictive::spatial::SpatialGrid;
-use spse_predictive::walk::{compute_depth_limit, is_arithmetic_query, is_reachable, predict_next, secondary_signal, WalkConfig, WalkMode};
+use spse_predictive::walk::{compute_depth_limit, evaluate_arithmetic, is_arithmetic_query, is_reachable, predict_next, secondary_signal, WalkConfig, WalkMode};
 use std::fs;
 use std::process::Command;
 
@@ -169,11 +169,14 @@ fn main() {
         println!("  Entity : {}", entity);
         println!("  Year   : {:?}", year);
 
-        // Guardrail 6: Arithmetic / logic interception — abort before classification
-        // if the query contains both a numeric token and an arithmetic signal.
+        // Guardrail 6: Arithmetic / logic interception — compute directly in Rust
+        // before classification; graph walk is bypassed for math queries entirely.
         if is_arithmetic_query(query) {
-            println!("\n  [GUARDRAIL_6]: Arithmetic/logic query detected.");
-            println!("  -> [BOT_OUTPUT]: System Fault: Graph walk cannot evaluate mathematical expressions — structural abort.");
+            println!("\n  [GUARDRAIL_6]: Arithmetic/logic query detected — computing natively.");
+            match evaluate_arithmetic(query) {
+                Some(answer) => println!("  -> [BOT_OUTPUT]: \"{}\"", answer),
+                None         => println!("  -> [BOT_OUTPUT]: \"I couldn't parse that arithmetic expression.\""),
+            }
             println!("\n=============================================\n");
             return;
         }
