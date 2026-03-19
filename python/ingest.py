@@ -7,8 +7,6 @@ import nltk
 try:
     nltk.download('punkt_tab', quiet=True)
     nltk.download('averaged_perceptron_tagger_eng', quiet=True)
-    nltk.download('maxent_ne_chunker_tab', quiet=True)
-    nltk.download('words', quiet=True)
 except Exception:
     pass
 
@@ -90,14 +88,32 @@ def corpus_batch_classify(all_sentences, model, store, batch_size=256):
 
 
 def extract_entities(text):
-    tokens = nltk.word_tokenize(text)
-    tags = nltk.pos_tag(tokens)
-    chunks = nltk.ne_chunk(tags)
-    entities = []
-    for chunk in chunks:
-        if hasattr(chunk, 'label'):
-            entities.append(' '.join(c[0] for c in chunk))
-    return entities
+    """Extract named-entity phrases from POS tags.
+
+    Groups consecutive NNP/NNPS tokens into entity phrases
+    (e.g. ['New', 'York', 'City'] → 'New York City').
+
+    Replaces nltk.ne_chunk which:
+      - loads a heavy MaxEnt model per call
+      - spawns loky/multiprocessing workers that collide with the
+        torch multiprocessing pool left open after batch encoding,
+        causing semaphore leaks and non-zero exit on Python 3.14
+    """
+    try:
+        tokens = nltk.word_tokenize(text)
+        tagged = nltk.pos_tag(tokens)
+        entities, current = [], []
+        for word, tag in tagged:
+            if tag in ('NNP', 'NNPS'):
+                current.append(word)
+            elif current:
+                entities.append(' '.join(current))
+                current = []
+        if current:
+            entities.append(' '.join(current))
+        return entities
+    except Exception:
+        return []
 
 
 def extract_date(text):

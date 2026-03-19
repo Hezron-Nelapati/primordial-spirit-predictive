@@ -6,8 +6,6 @@ import nltk
 try:
     nltk.download('punkt_tab', quiet=True)
     nltk.download('averaged_perceptron_tagger_eng', quiet=True)
-    nltk.download('maxent_ne_chunker_tab', quiet=True)
-    nltk.download('words', quiet=True)
 except Exception:
     pass
 
@@ -18,14 +16,23 @@ _DOMAIN_TAGS = {"NN", "NNS", "NNP", "NNPS"}
 
 
 def extract_entities(text):
-    tokens = nltk.word_tokenize(text)
-    tags = nltk.pos_tag(tokens)
-    chunks = nltk.ne_chunk(tags)
-    entities = []
-    for chunk in chunks:
-        if hasattr(chunk, 'label'):
-            entities.append(' '.join(c[0] for c in chunk))
-    return entities
+    """Extract named-entity phrases from POS tags (NNP/NNPS grouping).
+    See ingest.py for full explanation of why ne_chunk is avoided."""
+    try:
+        tokens = nltk.word_tokenize(text)
+        tagged = nltk.pos_tag(tokens)
+        entities, current = [], []
+        for word, tag in tagged:
+            if tag in ('NNP', 'NNPS'):
+                current.append(word)
+            elif current:
+                entities.append(' '.join(current))
+                current = []
+        if current:
+            entities.append(' '.join(current))
+        return entities
+    except Exception:
+        return []
 
 def extract_date(text):
     match = re.search(r'\b(10|11|12|13|14|15|16|17|18|19|20)\d{2}\b', text)
