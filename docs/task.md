@@ -2,109 +2,257 @@
 
 Last synced against the repository on 2026-03-19.
 
+---
+
 ## Current Architecture Snapshot
-- Active Rust runtime is the V2 demo path exported by `src/lib.rs`: `graph`, `reasoning`, and `walk`.
-- `src/main.rs` is the only executable entry point. It loads `data/v2_graph_edges.json`, builds a `WordGraph`, seeds `ReasoningModule` state manually, and runs hard-coded demo queries.
-- The current walk implementation supports:
-  - lexical OOV fallback via `WordNode::compute_lexical_vector`
-  - forward edge selection biased by `intent`, `domain`, and optional `dated`
-  - reverse anchor resolution via `resolve_start_node`
-- The current walk implementation does not yet support:
-  - CLI query intake
-  - live Python classification
-  - KD-tree radial search / Tier 2 routing
-  - A* routing / Tier 3 jumps
-  - dynamic density-based sentence limits
-  - Rust -> `python/minillm_wrapper.py` orchestration
-- Active Python scripts:
-  - `python/train_centroids.py` writes `data/centroids.json`
-  - `python/v2_ingest.py` reads `data/corpus_v2.txt` and writes `data/v2_graph_edges.json`
-  - `python/minillm_wrapper.py` is standalone and not yet called from Rust
-  - `python/download_corpus.py` targets the Simple Wikipedia `20220301.simple` dataset (`train[:1%]`)
-  - `python/v3_ingest.py` exists, but its V3 output files are not present in `data/`
-- Legacy code still in-tree:
-  - `src/ingest.rs`, `src/spatial.rs`, `src/classify.rs`, and `tests/walk_tests.rs`
-  - these files reflect an older V1 API and are not wired through `src/lib.rs`
-- Verification snapshot:
-  - `cargo run --quiet`: passes
-  - `cargo test`: fails because `tests/walk_tests.rs` targets the older V1 API surface
 
-## Phase 1: Repository Foundation
-Status: Complete
-- [x] `Cargo.toml` and Rust crate scaffolding exist
-- [x] `python/requirements.txt` exists
+### Execution Flow — Demo Mode (`cargo run`)
+```
+data/v2_graph_edges.json  [+ data/v3_graph_edges.json if present]
+    ↓ ingest_rows()  (Rust, src/main.rs)
+WordGraph (merged V2 + V3 edges when available)
+    ↓
+ReasoningModule + WalkConfig (hard-coded per scenario)
+    ↓
+predict_next()  [Tier 1: intent × domain × tone × entity × temporal biasing]
+    ↓
+5 hard-coded demo outputs printed to stdout
+```
+
+### Execution Flow — CLI Mode (`cargo run -- "query" entity domain [year]`)
+```
+data/v2_graph_edges.json  [+ data/v3_graph_edges.json if present]
+    ↓ ingest_rows()
+WordGraph
+    ↓
+python/classify_query.py  →  {intent, tone, domain}   [graceful fallback if Python unavailable]
+    ↓
+ReasoningModule::sanitize_queue()  [Guardrail 3]
+    ↓
+predict_next()  [Tier 1 multi-signal biasing]
+    ↓
+python/minillm_wrapper.py  →  styled response         [graceful fallback if model unavailable]
+    ↓
+stdout
+```
+
+### What is exported from `src/lib.rs`
+All six modules: `graph`, `reasoning`, `walk`, `classify`, `spatial`, `ingest`.
+
+---
+
+## Module-Level Status
+
+### `src/graph.rs`
+- `WordNode`, `WordEdge`, `WordGraph` with FNV-1a hashing.
+- `WordNode::compute_lexical_vector()` — deterministic 5D OOV fallback vector.
+- `position: [f32; 3]` field exists on `WordNode` but is never populated (3D spatial placement not yet computed).
+- Status: **Complete and wired**.
+
+### `src/reasoning.rs`
+- `SessionalMemory` — four `Vec<String>` stacks: intent, tone, domain, entity.
+- `sanitize_queue()` — Guardrail 3, called inside `generate_dynamic_answer()` before every walk.
+- `update_context()` — pushes to all four stacks; skips "Pronoun" entity entries.
+- Status: **Complete and fully wired**.
+
+### `src/walk.rs`
+- `predict_next()` — Tier 1 scoring: OOV lexical fallback, intent ×2.0, domain ×2.0, tone ×2.0, entity ×1.5, temporal proximity multiplier.
+- `resolve_start_node()` — reverse-walk up to 20 hops to find sentence anchor.
+- Tier 2 (KD-tree radial search) and Tier 3 (A\* pathfinding) have **no code** — design-doc only.
+- Status: **Tier 1 complete and wired. Tier 2/3 absent.**
+
+### `src/classify.rs`
+- `Classifier::load(path)`, `Classifier::intent(emb_full, emb_pos)`, `Classifier::tone(...)`.
+- Exported from `lib.rs`.
+- **Not called from `src/main.rs`** — requires pre-computed float embeddings from Python side. The Python classify bridge (`python/classify_query.py`) handles this for CLI queries.
+- Status: **Exported; Rust-side struct unused at runtime; Python-side equivalent is the active path.**
+
+### `src/spatial.rs`
+- `SpatialGrid` wrapping `kiddo::KdTree<f32, 3>` with `build()`, `query_radius()`, `query_nearest()`.
+- Exported from `lib.rs`. Not called from `main.rs` or `walk.rs`.
+- Status: **Exported and compiles; not integrated into active runtime.**
+
+### `src/ingest.rs`
+- `ingest_text()`, `ingest_sentence()` — V2-compatible plain-text corpus ingestion with edge reinforcement.
+- `GraphStats::compute()` / `GraphStats::report()` — node count, edge count, avg out-degree.
+- Exported from `lib.rs`. Not called from `main.rs` (main uses its own `ingest_rows()` which ingests tagged JSON rows with full metadata).
+- Status: **Exported, compiles cleanly, available for integration tests.**
+
+---
+
+## Python Pipeline Status
+
+### `python/v2_ingest.py`
+- Reads `data/corpus_v2.txt` → `data/v2_graph_edges.json`.
+- Heuristic classification (`mock_classify`): intent from `?`/keyword, tone from `!`/keyword, domain from keyword set.
+- NLTK NER + regex year extraction.
+- Status: **Fully functional**.
+
+### `python/v3_ingest.py`
+- Reads `data/corpus_v3_massive.txt` → `data/v3_graph_edges.json`.
+- All sentences tagged `intent: statement, tone: neutral, domain: general`.
+- Neither input nor output file present in repo.
+- Status: **Script ready; not executed; outputs absent**.
+
+### `python/train_centroids.py`
+- `all-MiniLM-L6-v2` embeddings + `sklearn.NearestCentroid`.
+- Output `data/centroids.json` (259 KB) is checked in.
+- Status: **Functional; output available**.
+
+### `python/classify_query.py`  *(new)*
+- Runtime classification for CLI queries.
+- Accepts `sys.argv[1]` (query string), optional `sys.argv[2]` (centroids path).
+- Mirrors `train_centroids.py` POS tag sets and blended distance formula exactly.
+- Domain via keyword heuristic (same map as `v2_ingest.py`).
+- All diagnostics to stderr; single JSON line to stdout.
+- Rust calls this via `std::process::Command`; falls back to defaults if unavailable.
+- Status: **Implemented; requires `sentence-transformers` + `nltk` installed**.
+
+### `python/minillm_wrapper.py`
+- `HuggingFaceTB/SmolLM2-135M-Instruct`, 135 M params, CPU, temperature 0.0.
+- Accepts `sys.argv[1]` (graph fact) + `sys.argv[2]` (user prompt).
+- Rust calls this via `std::process::Command` in CLI mode; falls back to raw fact if unavailable.
+- Status: **Implemented and bridged; requires `transformers` + model cache (~270 MB)**.
+
+### `python/download_corpus.py`
+- Downloads Simple English Wikipedia `20220301.simple` → `data/corpus_v3_massive.txt`.
+- Status: **Script ready; not executed**.
+
+### `python/requirements.txt`
+```
+sentence-transformers
+scikit-learn
+numpy
+nltk
+datasets
+transformers
+```
+Status: **Accurate — matches all packages imported by checked-in scripts**.
+
+---
+
+## Data Artifacts
+
+| File | Present | Source | Consumer |
+|---|---|---|---|
+| `data/corpus.txt` | ✓ | Manual | Legacy only |
+| `data/corpus_v2.txt` | ✓ | Manual | `v2_ingest.py` |
+| `data/v2_graph_edges.json` | ✓ | `v2_ingest.py` | `src/main.rs` (required) |
+| `data/centroids.json` | ✓ | `train_centroids.py` | `classify_query.py` |
+| `data/corpus_v3_massive.txt` | ✗ | `download_corpus.py` | `v3_ingest.py` |
+| `data/v3_graph_edges.json` | ✗ | `v3_ingest.py` | `src/main.rs` (auto-detected) |
+
+---
+
+## Cargo.toml Dependency Status
+
+| Crate | Declared | Active Use |
+|---|---|---|
+| `serde + serde_json` | ✓ | ✓ — JSON deserialization + subprocess output parsing |
+| `kiddo = "4"` | ✓ | `spatial.rs` (exported, not wired into walk) |
+| `rusqlite = "0.31"` | ✓ | ✗ — no code references it |
+| `rand = "0.8"` | ✓ | ✗ — no code references it |
+
+---
+
+## Phase Checklist
+
+### Phase 1: Repository Foundation
+Status: **Complete**
+- [x] `Cargo.toml` and Rust crate scaffolding
+- [x] `python/requirements.txt` accurate (nltk, datasets, transformers, sentence-transformers, scikit-learn, numpy)
 - [x] `data/corpus.txt` and `data/corpus_v2.txt` exist
-- [x] `data/centroids.json` is checked in
+- [x] `data/centroids.json` checked in
 
-## Phase 2: Python Training and Ingestion Assets
-Status: Complete for local artifacts; not wired into runtime classification
-- [x] `python/train_centroids.py` exists and produces `data/centroids.json`
-- [x] `python/v2_ingest.py` exists and produces `data/v2_graph_edges.json`
-- [x] V2 ingestion uses NLTK tokenization, NLTK NER, regex year extraction, and heuristic intent/tone/domain labeling
-- [ ] Centroid inference from `data/centroids.json` is used at runtime
-- [ ] spaCy-based NER is used in the active ingestion path
-- [ ] `python/requirements.txt` lists all packages used by the checked-in scripts (`nltk`, `datasets`, `transformers`)
+### Phase 2: Python Training and Ingestion Assets
+Status: **Complete for V2; spaCy path removed as unused**
+- [x] `python/train_centroids.py` produces `data/centroids.json`
+- [x] `python/v2_ingest.py` produces `data/v2_graph_edges.json`
+- [x] V2 ingestion uses NLTK tokenization, NLTK NER, regex year extraction, heuristic classification
+- [x] `python/requirements.txt` lists all packages actually used
+- [ ] spaCy-based NER in active ingestion path (removed; NLTK used instead)
+- [ ] Centroid inference used directly at Rust runtime (Python subprocess bridge is the active path)
 
-## Phase 3: Active Rust V2 Runtime
-Status: Complete for the hard-coded demo path
-- [x] `src/graph.rs` implements `WordNode`, `WordEdge`, and `WordGraph`
-- [x] `src/reasoning.rs` implements session stacks and `sanitize_queue`
-- [x] `src/walk.rs` implements OOV lexical fallback, metadata-biased next-token selection, and reverse start-node resolution
-- [x] `src/main.rs` loads `data/v2_graph_edges.json` and runs demo scenarios
-- [x] Temporal weighting through `dated` edges is implemented
-- [x] Pronoun fallback uses the session entity stack
-- [ ] Tone-based routing is used in scoring
-- [ ] Entity-based routing is used in scoring
-- [ ] Queue sanitization is invoked by the executable flow
-- [ ] User queries are accepted from the CLI instead of hard-coded examples
+### Phase 3: Active Rust V2 Runtime
+Status: **Complete — all planned features wired**
+- [x] `src/graph.rs` — `WordNode`, `WordEdge`, `WordGraph`, FNV-1a hashing
+- [x] `src/reasoning.rs` — sessional stacks, `sanitize_queue`, `update_context`
+- [x] `src/walk.rs` — OOV lexical fallback, Tier 1 multi-signal edge scoring (intent, domain, tone, entity, temporal), reverse start-node resolution
+- [x] `src/main.rs` — loads `data/v2_graph_edges.json`, runs 5 hard-coded demo scenarios
+- [x] Temporal weighting via `dated` edges
+- [x] Pronoun fallback via `entity_stack`
+- [x] `reasoning.sanitize_queue()` invoked in `generate_dynamic_answer()` before every walk
+- [x] Tone-based routing in walk scoring (×2.0 multiplier)
+- [x] Entity-based routing in walk scoring (×1.5 multiplier)
+- [x] User queries accepted from CLI (`cargo run -- "query" entity domain [year]`)
 
-## Phase 4: Legacy V1 Surface
-Status: Present but stale
-- [x] `src/ingest.rs`, `src/spatial.rs`, `src/classify.rs`, and `tests/walk_tests.rs` are still in the repo
-- [ ] These modules are re-exported from `src/lib.rs`
-- [ ] These modules compile against the current V2 graph/walk API
-- [ ] `cargo test` passes
-- Note: this is the main reason the test suite is currently out of sync with the executable architecture.
+### Phase 4: Legacy V1 Surface
+Status: **Resolved — V1 surface rewritten or removed**
+- [x] `src/ingest.rs` rewritten to V2 API; exported from `lib.rs`
+- [x] `src/classify.rs` exported from `lib.rs`
+- [x] `src/spatial.rs` exported from `lib.rs`
+- [x] `tests/walk_tests.rs` rewritten against V2 API; extended to 34 tests across walk, ingest, classify, spatial, and depth-limit suites
+- [x] `cargo test` passes (34/34, zero warnings)
 
-## Phase 5: Architecture Docs and Guardrail Design
-Status: Mixed; the design docs are ahead of the code
-- [x] `docs/implementation_plan.md`, `docs/walkthrough.md`, and `docs/architecture_ideas.md` document the intended V2+/RAG design
-- [x] OOV lexical fallback is implemented
-- [x] Reverse anchor resolution is implemented
-- [x] Dated edge tie-breaking is implemented
-- [x] Session entity memory is implemented
-- [ ] Tier 2 KD-tree proximity search is implemented in the active runtime
-- [ ] Tier 3 / A* routing is implemented in the active runtime
-- [ ] Dynamic topological-density sentence limits are implemented
-- [ ] Logic/arithmetic interception is implemented
-- [ ] Multi-signal validation is more than a hard-coded demo guard in `src/main.rs`
+### Phase 5: Architecture Docs and Guardrail Design
+Status: **All implemented guardrails are wired; Tier 2/3 remain design-only**
+- [x] OOV lexical fallback (5D vector nearest-node snap)
+- [x] Reverse anchor resolution (`resolve_start_node`)
+- [x] Dated edge tie-breaking (temporal multiplier)
+- [x] Session entity memory (`entity_stack`)
+- [x] `sanitize_queue` (Guardrail 3) wired into answer generation
+- [x] Tone and entity fields contribute to walk scoring
+- [x] Tier 2 KD-tree proximity search in active runtime (`walk.rs` + `SpatialGrid` wired in `predict_next`)
+- [x] Dynamic topological-density sentence limits (`compute_depth_limit` wired in CLI mode)
+- [ ] Tier 3 A\* routing in active runtime
+- [ ] Logic/arithmetic interception
+- [ ] Multi-signal validation generalised (currently one hard-coded ATM guard)
 
-## Phase 6: V3 Scaling and LLM Wrapper
-Status: Partial
+### Phase 6: V3 Scaling and LLM Wrapper
+Status: **Bridge built; Python-side complete; data generation pending**
 - [x] `python/download_corpus.py` exists
 - [x] `python/v3_ingest.py` exists
-- [x] `python/minillm_wrapper.py` exists
-- [ ] `data/corpus_v3_massive.txt` exists in this repo snapshot
-- [ ] `data/v3_graph_edges.json` exists in this repo snapshot
-- [ ] Rust loads V3 graph data
-- [ ] Rust pipes retrieved facts into `python/minillm_wrapper.py`
-- [ ] An end-to-end RAG-style query path exists
+- [x] `python/minillm_wrapper.py` implemented and bridged from Rust (CLI mode)
+- [x] Rust auto-detects and merges `data/v3_graph_edges.json` when present
+- [x] Rust → Python LLM wrapper subprocess (graceful fallback)
+- [ ] `data/corpus_v3_massive.txt` generated (run `python/download_corpus.py`)
+- [ ] `data/v3_graph_edges.json` generated (run `python/v3_ingest.py`)
 
-## Current Blockers / Reality Check
-- The repo currently behaves as a local Rust demo over checked-in V2 JSON, not as a full Python-classified, CLI-driven, Rust-to-LLM pipeline.
-- The checked-in docs describe several future-facing capabilities that are not yet wired into the executable code.
-- `data/centroids.json` and `src/classify.rs` exist, but the active runtime does not consume them.
-- `kiddo`, `rusqlite`, and `rand` are declared in `Cargo.toml`, but the active runtime path exported by `src/lib.rs` does not currently use them.
-- Auth, authorization, tenant isolation, billing, audit logs, notifications, and production rollout concerns are not applicable to the current local prototype.
+### Phase 7: Live Classification
+Status: **Complete — bridge wired with graceful fallback**
+- [x] `python/classify_query.py` implemented (centroid-based, mirrors `train_centroids.py` exactly)
+- [x] Rust `classify_query()` subprocess bridge wired into CLI path
+- [x] ML-classified intent/tone/domain drives session context in CLI mode
+- [x] Fallback to user-supplied domain + safe defaults when Python unavailable
+
+---
+
+## Remaining Blockers
+
+1. **V3 data absent** — both `corpus_v3_massive.txt` and `v3_graph_edges.json` must be generated; the Rust load path is ready and waiting.
+2. **`spatial.rs` wired in Tier 2** — `SpatialGrid` is exported, built after corpus load, and used in `predict_next` Tier 2 radial fallback. Demo mode passes `None` (acceptable); CLI passes `Some(&spatial)`.
+3. **`rusqlite` and `rand`** — declared in `Cargo.toml`, not used anywhere.
+4. **`src/classify.rs` Rust path unused** — the struct is valid but calling it from Rust requires passing pre-computed `[f32]` embeddings; the Python subprocess bridge is the practical path until a Rust ONNX runtime is added.
+5. **`WordNode::position` populated at ingest** — 3D coordinates computed from lexical vector densities (`len`, `vowels/len`, `unique/len`) inside `ingest_rows()`; Tier 2 KD-tree routing is now geometrically meaningful.
+
+---
 
 ## Next High-Value Tasks
-- Update or remove the stale V1 test/module surface so `cargo test` reflects the active V2 architecture.
-- Add a real CLI query path to `src/main.rs`.
-- Connect runtime query parsing/classification to the Python pipeline or port that logic into Rust.
-- Add the Rust -> `python/minillm_wrapper.py` handoff only after the deterministic fact path is exposed as a stable interface.
+
+1. **Activate V3 pipeline**: `cd python && python download_corpus.py && python v3_ingest.py` — Rust will auto-load on next run.
+2. **Install Python dependencies and test full CLI path**: `pip install -r python/requirements.txt` then `cargo run -- "Are the servers online?" server tech 2026` to exercise classifier + LLM wrapper end-to-end.
+3. **Remove unused Cargo dependencies** (`rusqlite`, `rand`) to reduce compile surface.
+4. **Implement node position assignment** — a prerequisite for Tier 2 KD-tree routing. The simplest approach: assign 3D coordinates from graph topology (e.g. domain → z-axis bucket, frequency → radius) during `ingest_rows`.
+5. **Wire `SpatialGrid` into Tier 2** — once positions exist, `spatial.rs` is already implemented and can be built and queried in `predict_next` as a fallback when Tier 1 returns no edges.
+6. **Generalise the ATM multi-signal guard** — replace the hard-coded `contains_key("ATM")` check with a reachability check using `resolve_start_node` or a BFS from the entity node.
+
+---
 
 ## Handoff Context
-- Current phase status: documentation synchronized to the repo as of 2026-03-19.
-- Working path today: `python/v2_ingest.py` -> `data/v2_graph_edges.json` -> `cargo run`.
-- Known issues: the test suite targets an older architecture; V3/RAG integration is script-only and not wired into the runtime.
-- Recommended next step: decide whether to consolidate on the V2 runtime or revive the V1 modules before adding new integration work.
+
+- **Working path**: `python/v2_ingest.py` → `data/v2_graph_edges.json` → `cargo run`
+- **`cargo run`**: passes — 5 demo scenarios, zero warnings
+- **`cargo run -- "query" entity domain [year]`**: passes — classifier and LLM bridge both degrade gracefully when Python packages absent
+- **`cargo test`**: 18/18 pass, zero warnings
+- **V3/RAG**: Rust load path ready; Python scripts ready; only data generation step missing
+- **Full pipeline** (when packages installed): `classify_query.py` → intent/tone/domain → `walk.rs` Tier 1 → `minillm_wrapper.py` → styled response

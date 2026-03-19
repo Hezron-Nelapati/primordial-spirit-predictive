@@ -1,4 +1,4 @@
-use crate::graph::{WordGraph, WordEdge, NodeId};
+use crate::graph::WordGraph;
 
 pub struct SessionalMemory {
     pub intent_stack: Vec<String>,

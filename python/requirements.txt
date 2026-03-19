@@ -1,4 +1,6 @@
 sentence-transformers
 scikit-learn
 numpy
-spacy
+nltk
+datasets
+transformers
