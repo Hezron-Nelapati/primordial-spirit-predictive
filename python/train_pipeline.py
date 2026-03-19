@@ -4,9 +4,9 @@ Automated training pipeline for SPSE Predictive.
 
 Steps (in order):
   1. Check / download corpus data
-  2. Run V2 ingest     → data/corpus_v2_tmp.json  (intermediate)
-  3. Run V3 ingest     → data/corpus_v3_tmp.json  (intermediate, optional)
-  4. Merge all         → data/corpus.json          (unified)
+  2. Run ingest        → data/corpus_tmp.json       (intermediate)
+  3. Run ingest_wiki   → data/corpus_wiki_tmp.json  (intermediate, optional)
+  4. Merge all         → data/corpus.json            (unified)
   5. Reinforce edges   → data/corpus_reinforced.json
   6. Train centroids   → data/centroids.json
   7. Reset graph.db    → so Rust rebuilds from reinforced corpus on next query
@@ -24,11 +24,11 @@ ROOT        = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 PYTHON_DIR  = os.path.join(ROOT, "python")
 DATA_DIR    = os.path.join(ROOT, "data")
 
-V2_CORPUS_TXT       = os.path.join(DATA_DIR, "corpus_v2.txt")
-V3_CORPUS_TXT       = os.path.join(DATA_DIR, "corpus_v3_massive.txt")
-V2_TMP_JSON         = os.path.join(DATA_DIR, "corpus_v2_tmp.json")   # intermediate
-V3_TMP_JSON         = os.path.join(DATA_DIR, "corpus_v3_tmp.json")   # intermediate
-CORPUS_JSON         = os.path.join(DATA_DIR, "corpus.json")          # merged output
+BASE_CORPUS_TXT     = os.path.join(DATA_DIR, "corpus.txt")
+WIKI_CORPUS_TXT     = os.path.join(DATA_DIR, "corpus_wiki.txt")
+BASE_TMP_JSON       = os.path.join(DATA_DIR, "corpus_tmp.json")       # intermediate
+WIKI_TMP_JSON       = os.path.join(DATA_DIR, "corpus_wiki_tmp.json")  # intermediate
+CORPUS_JSON         = os.path.join(DATA_DIR, "corpus.json")           # merged output
 CORPUS_REINFORCED   = os.path.join(DATA_DIR, "corpus_reinforced.json")
 CENTROIDS_JSON      = os.path.join(DATA_DIR, "centroids.json")
 GRAPH_DB            = os.path.join(DATA_DIR, "graph.db")
@@ -84,78 +84,78 @@ def main() -> None:
     # ── Step 1: Check corpus ──────────────────────────────────────────────────
     log("STEP", "Checking corpus data")
 
-    if not os.path.exists(V2_CORPUS_TXT):
-        log("ERROR", "data/corpus_v2.txt not found — V2 corpus is required")
-        log("ERROR", "Place a corpus_v2.txt file in the data/ directory and retry.")
+    if not os.path.exists(BASE_CORPUS_TXT):
+        log("ERROR", "data/corpus.txt not found — base corpus is required")
+        log("ERROR", "Place a corpus.txt file in the data/ directory and retry.")
         sys.exit(1)
-    log("DONE", "V2 corpus (corpus_v2.txt) present")
+    log("DONE", "Base corpus (corpus.txt) present")
 
-    v3_present = os.path.exists(V3_CORPUS_TXT)
-    if not v3_present:
-        log("STEP", "Downloading Wikipedia corpus (corpus_v3_massive.txt) …")
+    wiki_present = os.path.exists(WIKI_CORPUS_TXT)
+    if not wiki_present:
+        log("STEP", "Downloading Wikipedia corpus (corpus_wiki.txt) …")
         log("PROGRESS", "  This can take several minutes depending on your connection.")
         rc = run_script("download_corpus.py")
         if rc != 0:
-            log("WARN", "Wikipedia download failed — V3 corpus will be skipped")
-            v3_present = False
+            log("WARN", "Wikipedia download failed — Wikipedia corpus will be skipped")
+            wiki_present = False
         else:
-            v3_present = os.path.exists(V3_CORPUS_TXT)
-            if v3_present:
+            wiki_present = os.path.exists(WIKI_CORPUS_TXT)
+            if wiki_present:
                 log("DONE", "Wikipedia corpus downloaded")
             else:
-                log("WARN", "Download finished but file not found — skipping V3")
+                log("WARN", "Download finished but file not found — skipping Wikipedia ingest")
     else:
-        log("DONE", "V3 Wikipedia corpus (corpus_v3_massive.txt) already present")
+        log("DONE", "Wikipedia corpus (corpus_wiki.txt) already present")
 
-    # ── Step 2: V2 ingest ────────────────────────────────────────────────────
-    log("STEP", "Running V2 corpus ingest")
-    rc = run_script("v2_ingest.py")
+    # ── Step 2: Base corpus ingest ────────────────────────────────────────────
+    log("STEP", "Running base corpus ingest")
+    rc = run_script("ingest.py")
     if rc != 0:
-        log("ERROR", "V2 ingest failed (see output above)")
+        log("ERROR", "Base corpus ingest failed (see output above)")
         sys.exit(1)
-    log("DONE", "V2 ingest complete")
+    log("DONE", "Base corpus ingest complete")
 
-    # ── Step 3: V3 ingest (optional) ─────────────────────────────────────────
-    if v3_present:
-        log("STEP", "Running V3 Wikipedia ingest (slow)")
+    # ── Step 3: Wikipedia ingest (optional) ───────────────────────────────────
+    if wiki_present:
+        log("STEP", "Running Wikipedia ingest (slow)")
         log("PROGRESS", "  This processes the full Wikipedia corpus — may take 10–30 min.")
-        rc = run_script("v3_ingest.py")
+        rc = run_script("ingest_wiki.py")
         if rc != 0:
-            log("WARN", "V3 ingest failed — the system will still work without V3 data")
-            v3_present = False
+            log("WARN", "Wikipedia ingest failed — the system will still work without Wikipedia data")
+            wiki_present = False
         else:
-            log("DONE", "V3 ingest complete")
+            log("DONE", "Wikipedia ingest complete")
     else:
-        log("STEP", "V3 corpus absent — skipping V3 ingest")
+        log("STEP", "Wikipedia corpus absent — skipping Wikipedia ingest")
 
     # ── Step 4: Merge into unified corpus.json ───────────────────────────────
     log("STEP", "Merging ingested corpora → data/corpus.json")
     merged_data = []
     try:
-        with open(V2_TMP_JSON, encoding="utf-8") as f:
+        with open(BASE_TMP_JSON, encoding="utf-8") as f:
             merged_data.extend(json.load(f))
-        log("PROGRESS", f"  Added {len(merged_data)} entries from V2 ingest.")
+        log("PROGRESS", f"  Added {len(merged_data)} entries from base corpus ingest.")
     except FileNotFoundError:
-        log("ERROR", f"V2 ingest output not found: {V2_TMP_JSON}")
+        log("ERROR", f"Base ingest output not found: {BASE_TMP_JSON}")
         sys.exit(1)
 
-    if v3_present:
+    if wiki_present:
         try:
-            with open(V3_TMP_JSON, encoding="utf-8") as f:
-                v3_data = json.load(f)
-                merged_data.extend(v3_data)
-            log("PROGRESS", f"  Added {len(v3_data)} entries from V3 ingest. Total: {len(merged_data)}")
+            with open(WIKI_TMP_JSON, encoding="utf-8") as f:
+                wiki_data = json.load(f)
+                merged_data.extend(wiki_data)
+            log("PROGRESS", f"  Added {len(wiki_data)} entries from Wikipedia ingest. Total: {len(merged_data)}")
         except FileNotFoundError:
-            log("WARN", f"V3 ingest output not found: {V3_TMP_JSON} — skipping.")
+            log("WARN", f"Wikipedia ingest output not found: {WIKI_TMP_JSON} — skipping.")
         except json.JSONDecodeError:
-            log("WARN", f"V3 ingest output is not valid JSON — skipping.")
+            log("WARN", f"Wikipedia ingest output is not valid JSON — skipping.")
 
     with open(CORPUS_JSON, "w", encoding="utf-8") as f:
         json.dump(merged_data, f)
     log("DONE", f"Unified corpus created: {len(merged_data)} entries → data/corpus.json")
 
     # Clean up intermediate ingest files
-    for tmp in (V2_TMP_JSON, V3_TMP_JSON):
+    for tmp in (BASE_TMP_JSON, WIKI_TMP_JSON):
         if os.path.exists(tmp):
             os.remove(tmp)
 
@@ -171,7 +171,7 @@ def main() -> None:
 
     # ── Step 6: Train centroids ───────────────────────────────────────────────
     log("STEP", "Training centroid classifier → data/centroids.json")
-    log("PROGRESS", "  Loading all-MiniLM-L6-v2 and encoding corpus …")
+    log("PROGRESS", "  Loading sentence-transformer model and encoding corpus …")
     rc = run_script("train_centroids.py")
     if rc != 0:
         log("ERROR", "Centroid training failed (see output above)")

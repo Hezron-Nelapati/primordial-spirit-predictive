@@ -80,7 +80,7 @@ def extract_entities(text):
     return entities
 
 def extract_date(text):
-    # Range 1000–2099 — matches v3_ingest.py and reasoning.rs for consistency.
+    # Range 1000–2099 — matches ingest_wiki.py and reasoning.rs for consistency.
     match = re.search(r'\b(10|11|12|13|14|15|16|17|18|19|20)\d{2}\b', text)
     if match:
         return int(match.group(0))
@@ -116,11 +116,11 @@ def main():
         clf_model = SentenceTransformer("all-MiniLM-L6-v2")
         with open("../data/centroids.json") as f:
             clf_store = json.load(f)
-        print("  [V2_INGEST]: Centroid model loaded — using symmetric classification.")
+        print("  [INGEST]: Centroid model loaded — using symmetric classification.")
     except Exception as e:
-        print(f"  [V2_INGEST]: Centroid model unavailable ({e}) — falling back to mock_classify().")
+        print(f"  [INGEST]: Centroid model unavailable ({e}) — falling back to mock_classify().")
 
-    with open('../data/corpus_v2.txt', 'r', encoding='utf-8') as f:
+    with open('../data/corpus.txt', 'r', encoding='utf-8') as f:
         paragraphs = f.read().split('\n')
 
     processed_data = []
@@ -155,9 +155,9 @@ def main():
                 "dated": dated
             })
 
-    with open('../data/corpus_v2_tmp.json', 'w', encoding='utf-8') as f:
+    with open('../data/corpus_tmp.json', 'w', encoding='utf-8') as f:
         json.dump(processed_data, f, indent=2)
-    print("V2 Python Ingestion Complete! Exported to data/corpus_v2_tmp.json")
+    print("Python Ingestion Complete! Exported to data/corpus_tmp.json")
 
 if __name__ == "__main__":
     main()

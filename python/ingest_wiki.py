@@ -90,7 +90,7 @@ def batch_classify(sentences, model, store):
 
 def main():
     try:
-        with open('../data/corpus_v3_massive.txt', 'r', encoding='utf-8') as f:
+        with open('../data/corpus_wiki.txt', 'r', encoding='utf-8') as f:
             paragraphs = f.read().split('\n')
     except Exception as e:
         print("Missing Wikipedia Corpus!")
@@ -104,12 +104,12 @@ def main():
         clf_model = SentenceTransformer("all-MiniLM-L6-v2")
         with open("../data/centroids.json") as f:
             clf_store = json.load(f)
-        print("  [V3_INGEST]: Centroid model loaded — using symmetric classification.")
+        print("  [INGEST_WIKI]: Centroid model loaded — using symmetric classification.")
     except Exception as e:
-        print(f"  [V3_INGEST]: Centroid model unavailable ({e}) — using statement/neutral/general fallback.")
+        print(f"  [INGEST_WIKI]: Centroid model unavailable ({e}) — using statement/neutral/general fallback.")
 
     processed_data = []
-    print(f"  [PYTHON_INGEST]: Processing {len(paragraphs)} Massive Wikipedia Articles...")
+    print(f"  [INGEST_WIKI]: Processing {len(paragraphs)} Massive Wikipedia Articles...")
 
     for i, para in enumerate(paragraphs):
         if not para.strip(): continue
@@ -139,11 +139,11 @@ def main():
             })
 
         if i % 500 == 0:
-            print(f"  [PYTHON_INGEST]: Parsed {i} documents into geometric structural queues...")
+            print(f"  [INGEST_WIKI]: Parsed {i} documents into geometric structural queues...")
 
-    with open('../data/corpus_v3_tmp.json', 'w', encoding='utf-8') as f:
+    with open('../data/corpus_wiki_tmp.json', 'w', encoding='utf-8') as f:
         json.dump(processed_data, f, indent=2)
-    print("V3 Python Ingestion Complete! Exported thousands of nodes to data/corpus_v3_tmp.json")
+    print("Wikipedia Ingestion Complete! Exported thousands of nodes to data/corpus_wiki_tmp.json")
 
 if __name__ == "__main__":
     main()

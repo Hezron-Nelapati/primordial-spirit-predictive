@@ -34,7 +34,7 @@ RUN pip install --no-cache-dir -r python/requirements.txt
 # Download spaCy model (correct method: python3 -m spacy download)
 RUN python3 -m spacy download en_core_web_sm
 
-# Download NLTK data required by classify_query.py, v2_ingest.py, server.py
+# Download NLTK data required by classify_query.py, ingest.py, server.py
 RUN python3 -c "\
 import nltk; \
 nltk.download('punkt_tab',                    quiet=True); \

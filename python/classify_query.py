@@ -39,7 +39,7 @@ INTENT_TAGS = {"VB", "VBD", "VBG", "VBN", "VBP", "VBZ", "NN", "NNS", "NNP", "NNP
 TONE_TAGS   = {"JJ", "JJR", "JJS", "RB", "RBR", "RBS", "UH"}
 DOMAIN_TAGS = {"NN", "NNS", "NNP", "NNPS"}
 
-# ── domain keyword map — mirrors v2_ingest.py mock_classify() ─────────────────
+# ── domain keyword map — mirrors ingest.py mock_classify() ───────────────────
 DOMAIN_KEYWORDS = {
     "tech":      {"server", "router", "network", "cpu", "online", "offline", "system", "data", "api", "code"},
     "science":   {"quantum", "physics", "atom", "particle", "energy", "wave", "molecule", "force", "mass"},

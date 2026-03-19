@@ -16,14 +16,14 @@ def main():
     total_sentences = 0
     os.makedirs("../data", exist_ok=True)
     
-    with open("../data/corpus_v3_massive.txt", "w", encoding="utf-8") as f:
+    with open("../data/corpus_wiki.txt", "w", encoding="utf-8") as f:
         for doc in ds:
             # Clean up the markdown spacing
             text = doc['text'].replace('\n\n', '\n').strip()
             f.write(text + "\n")
             total_sentences += len(text.split("."))
 
-    print(f"✅ Downloaded Massive V3 Corpus to data/corpus_v3_massive.txt.")
+    print(f"✅ Downloaded Wikipedia corpus to data/corpus_wiki.txt.")
     print(f"✅ Total Topological Sentences Extracted: ~{total_sentences}")
 
 if __name__ == "__main__":
