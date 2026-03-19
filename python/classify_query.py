@@ -29,12 +29,12 @@ _DEFAULT_CENTROIDS = os.path.join(_MODULE_DIR, "..", "data", "centroids.json")
 # ── Module-level singletons — loaded once, reused for every classify() call ──
 _model: SentenceTransformer | None = None
 _store: dict | None                = None
-_nlp                               = None   # spaCy model or False (unavailable)
+_nlp                               = None   # spaCy model, loaded once on first classify()
 
-# ── NER entity types to extract (spaCy label set) ────────────────────────────
+# ── NER types — must match ingest.py / ingest_wiki.py exactly ────────────────
 NER_TYPES = {"PERSON", "ORG", "GPE", "PRODUCT"}
 
-# ── POS tag sets — must match train_centroids.py exactly ─────────────────────
+# ── POS tag sets — must match ingest.py / ingest_wiki.py / train_centroids.py ─
 INTENT_TAGS = {"VB", "VBD", "VBG", "VBN", "VBP", "VBZ", "NN", "NNS", "NNP", "NNPS"}
 TONE_TAGS   = {"JJ", "JJR", "JJS", "RB", "RBR", "RBS", "UH"}
 DOMAIN_TAGS = {"NN", "NNS", "NNP", "NNPS"}
@@ -122,30 +122,23 @@ def reset_store() -> None:
 
 
 def _get_nlp():
+    """Load spaCy en_core_web_sm once and cache it.  Same model used in
+    ingest.py / ingest_wiki.py — entity extraction logic is identical across
+    training and runtime so stored entity strings always match query entities."""
     global _nlp
     if _nlp is None:
-        try:
-            import spacy
-            _nlp = spacy.load("en_core_web_sm")
-            print("  [classify_query]: spaCy en_core_web_sm loaded (once).", file=sys.stderr)
-        except (ImportError, OSError) as exc:
-            print(f"  [classify_query]: spaCy unavailable ({exc}) — NER disabled.", file=sys.stderr)
-            _nlp = False
+        import spacy
+        _nlp = spacy.load("en_core_web_sm")
+        print("  [classify_query]: spaCy en_core_web_sm loaded.", file=sys.stderr)
     return _nlp
 
 
 def _ner_entities(text: str) -> list:
-    """Extract named entity surface strings from text using spaCy en_core_web_sm.
-    Returns an empty list if spaCy or its model is unavailable — callers must
-    treat [] as a valid (no-entity) response rather than an error.
-    """
-    nlp = _get_nlp()
-    if not nlp:
-        return []
+    """Extract named entities using spaCy — identical to ingest.py Pass 3."""
     try:
-        doc = nlp(text)
+        doc = _get_nlp()(text)
         entities = [ent.text for ent in doc.ents if ent.label_ in NER_TYPES]
-        print(f"  [classify_query]: NER extracted {entities}", file=sys.stderr)
+        print(f"  [classify_query]: NER → {entities}", file=sys.stderr)
         return entities
     except Exception as exc:
         print(f"  [classify_query]: NER failed ({exc})", file=sys.stderr)

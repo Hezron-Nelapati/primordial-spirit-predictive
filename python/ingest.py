@@ -1,7 +1,13 @@
 import json
 import math
+import os
 import re
 import nltk
+
+# Prevent torch tokenizer workers from spawning — avoids semaphore conflicts
+# with any other multiprocessing library (spaCy, NLTK, etc.) that runs
+# alongside or after the sentence-transformer encoding pass.
+os.environ.setdefault("TOKENIZERS_PARALLELISM", "false")
 
 # Download required NLTK data
 try:
@@ -10,7 +16,10 @@ try:
 except Exception:
     pass
 
-# ── POS tag sets — must mirror classify_query.py exactly ─────────────────────
+# ── NER types — must match classify_query.py exactly ─────────────────────────
+NER_TYPES = {"PERSON", "ORG", "GPE", "PRODUCT"}
+
+# ── POS tag sets — must match classify_query.py exactly ──────────────────────
 _INTENT_TAGS = {"VB", "VBD", "VBG", "VBN", "VBP", "VBZ", "NN", "NNS", "NNP", "NNPS"}
 _TONE_TAGS   = {"JJ", "JJR", "JJS", "RB", "RBR", "RBS", "UH"}
 _DOMAIN_TAGS = {"NN", "NNS", "NNP", "NNPS"}
@@ -37,14 +46,10 @@ def _nearest_blended(emb_full, emb_pos, full_centroids, pos_centroids, labels):
 
 
 def corpus_batch_classify(all_sentences, model, store, batch_size=256):
-    """Encode the entire corpus in one pass.
+    """Encode the entire corpus in one pass, classify intent/tone/domain.
 
-    Collects every sentence up-front then calls model.encode() once per
-    text-variant (full / intent-pos / tone-pos / domain-pos) with a large
-    batch_size.  This gives the GPU/MPS a single large matrix multiply instead
-    of thousands of tiny ones — typically 10-50× faster than per-paragraph
-    batching.
-
+    Single large model.encode() call per text variant gives the GPU/MPS one big
+    matrix multiply instead of thousands of tiny ones — typically 10-50× faster.
     Returns a list of (intent, tone, domain) tuples, one per sentence.
     """
     n = len(all_sentences)
@@ -87,35 +92,6 @@ def corpus_batch_classify(all_sentences, model, store, batch_size=256):
     return results
 
 
-def extract_entities(text):
-    """Extract named-entity phrases from POS tags.
-
-    Groups consecutive NNP/NNPS tokens into entity phrases
-    (e.g. ['New', 'York', 'City'] → 'New York City').
-
-    Replaces nltk.ne_chunk which:
-      - loads a heavy MaxEnt model per call
-      - spawns loky/multiprocessing workers that collide with the
-        torch multiprocessing pool left open after batch encoding,
-        causing semaphore leaks and non-zero exit on Python 3.14
-    """
-    try:
-        tokens = nltk.word_tokenize(text)
-        tagged = nltk.pos_tag(tokens)
-        entities, current = [], []
-        for word, tag in tagged:
-            if tag in ('NNP', 'NNPS'):
-                current.append(word)
-            elif current:
-                entities.append(' '.join(current))
-                current = []
-        if current:
-            entities.append(' '.join(current))
-        return entities
-    except Exception:
-        return []
-
-
 def extract_date(text):
     # Range 1000–2099 — matches ingest_wiki.py and reasoning.rs for consistency.
     match = re.search(r'\b(10|11|12|13|14|15|16|17|18|19|20)\d{2}\b', text)
@@ -146,6 +122,26 @@ def mock_classify(text):
 
 
 def main():
+    # ── Pass 1: tokenize corpus into sentences (CPU / NLTK only) ─────────────
+    # All NLTK work runs here — before the torch model is loaded — so there is
+    # no multiprocessing interaction between NLTK and torch workers.
+    with open('../data/corpus.txt', 'r', encoding='utf-8') as f:
+        paragraphs = f.read().split('\n')
+
+    print(f"  [INGEST]: Tokenizing {len(paragraphs):,} lines into sentences …", flush=True)
+    para_sentences = []  # list of sentence lists, one per non-empty paragraph
+    all_sentences  = []  # flat list — fed to corpus_batch_classify and nlp.pipe
+    for para in paragraphs:
+        if not para.strip():
+            continue
+        sents = nltk.sent_tokenize(para)
+        if sents:
+            para_sentences.append(sents)
+            all_sentences.extend(sents)
+
+    print(f"  [INGEST]: {len(all_sentences):,} sentences across {len(para_sentences):,} paragraphs", flush=True)
+
+    # ── Pass 2: encode & classify intent / tone / domain (GPU / torch) ───────
     clf_model = None
     clf_store = None
     try:
@@ -158,46 +154,46 @@ def main():
     except Exception as e:
         print(f"  [INGEST]: Centroid model unavailable ({e}) — falling back to mock_classify().", flush=True)
 
-    with open('../data/corpus.txt', 'r', encoding='utf-8') as f:
-        paragraphs = f.read().split('\n')
-
-    # ── Pass 1: tokenize entire corpus into sentences (CPU, NLTK) ────────────
-    # Collect all sentences first so we can encode the whole corpus in one shot.
-    print(f"  [INGEST]: Tokenizing {len(paragraphs):,} lines into sentences …", flush=True)
-    para_sentences = []   # list of (para_idx, [sentence, ...])
-    all_sentences  = []   # flat list — fed to corpus_batch_classify
-    for para in paragraphs:
-        if not para.strip():
-            continue
-        sents = nltk.sent_tokenize(para)
-        if sents:
-            para_sentences.append(sents)
-            all_sentences.extend(sents)
-
-    print(f"  [INGEST]: {len(all_sentences):,} sentences across {len(para_sentences):,} paragraphs", flush=True)
-
-    # ── Pass 2: encode & classify the full corpus in one batch ───────────────
     if clf_model is not None and clf_store is not None:
         classifications = corpus_batch_classify(all_sentences, clf_model, clf_store)
     else:
         classifications = [mock_classify(s) for s in all_sentences]
 
-    # ── Pass 3: NLTK entity/date extraction + assemble output ────────────────
-    print(f"  [INGEST]: Extracting entities and dates …", flush=True)
+    # Explicitly release the torch model so its workers are cleaned up before
+    # spaCy starts.  This prevents the loky semaphore leak on Python 3.14.
+    del clf_model
+
+    # ── Pass 3: spaCy NER (identical logic to classify_query.py) ─────────────
+    # nlp.pipe() processes the full sentence list in one batched call — no
+    # per-sentence overhead, no extra processes spawned.
+    print(f"  [INGEST]: Extracting entities with spaCy (batch) …", flush=True)
+    entity_lists = []
+    try:
+        import spacy
+        nlp = spacy.load("en_core_web_sm")
+        for doc in nlp.pipe(all_sentences, batch_size=256):
+            entity_lists.append([ent.text for ent in doc.ents if ent.label_ in NER_TYPES])
+    except (ImportError, OSError) as e:
+        print(f"  [INGEST]: spaCy unavailable ({e}) — entities will be empty.", flush=True)
+        entity_lists = [[] for _ in all_sentences]
+
+    # ── Pass 4: date extraction + assemble output ─────────────────────────────
     processed_data = []
-    cls_iter = iter(classifications)
+    cls_iter    = iter(classifications)
+    entity_iter = iter(entity_lists)
     for sents in para_sentences:
         for seq, sent in enumerate(sents):
             intent, tone, domain = next(cls_iter)
+            entities = next(entity_iter)
             processed_data.append({
                 "sequence_id": seq,
-                "text": sent,
-                "tokens": nltk.word_tokenize(sent),
-                "intent": intent,
-                "tone": tone,
-                "domain": domain,
-                "entities": extract_entities(sent),
-                "dated": extract_date(sent),
+                "text":        sent,
+                "tokens":      nltk.word_tokenize(sent),
+                "intent":      intent,
+                "tone":        tone,
+                "domain":      domain,
+                "entities":    entities,
+                "dated":       extract_date(sent),
             })
 
     with open('../data/corpus_tmp.json', 'w', encoding='utf-8') as f:

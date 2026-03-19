@@ -1,7 +1,10 @@
 import json
 import math
+import os
 import re
 import nltk
+
+os.environ.setdefault("TOKENIZERS_PARALLELISM", "false")
 
 try:
     nltk.download('punkt_tab', quiet=True)
@@ -9,36 +12,14 @@ try:
 except Exception:
     pass
 
-# ── POS tag sets — must mirror classify_query.py exactly ─────────────────────
+# ── NER types — must match classify_query.py exactly ─────────────────────────
+NER_TYPES = {"PERSON", "ORG", "GPE", "PRODUCT"}
+
+# ── POS tag sets — must match classify_query.py exactly ──────────────────────
 _INTENT_TAGS = {"VB", "VBD", "VBG", "VBN", "VBP", "VBZ", "NN", "NNS", "NNP", "NNPS"}
 _TONE_TAGS   = {"JJ", "JJR", "JJS", "RB", "RBR", "RBS", "UH"}
 _DOMAIN_TAGS = {"NN", "NNS", "NNP", "NNPS"}
 
-
-def extract_entities(text):
-    """Extract named-entity phrases from POS tags (NNP/NNPS grouping).
-    See ingest.py for full explanation of why ne_chunk is avoided."""
-    try:
-        tokens = nltk.word_tokenize(text)
-        tagged = nltk.pos_tag(tokens)
-        entities, current = [], []
-        for word, tag in tagged:
-            if tag in ('NNP', 'NNPS'):
-                current.append(word)
-            elif current:
-                entities.append(' '.join(current))
-                current = []
-        if current:
-            entities.append(' '.join(current))
-        return entities
-    except Exception:
-        return []
-
-def extract_date(text):
-    match = re.search(r'\b(10|11|12|13|14|15|16|17|18|19|20)\d{2}\b', text)
-    if match:
-        return int(match.group(0))
-    return None
 
 def _pos_filter(text, tag_set):
     tokens = nltk.word_tokenize(text)
@@ -46,8 +27,10 @@ def _pos_filter(text, tag_set):
     words  = [w for w, t in tagged if t in tag_set]
     return " ".join(words) if words else text
 
+
 def _euclidean(a, b):
     return math.sqrt(sum((x - y) ** 2 for x, y in zip(a, b)))
+
 
 def _nearest_blended(emb_full, emb_pos, full_centroids, pos_centroids, labels):
     best_idx, min_dist = 0, float("inf")
@@ -59,23 +42,16 @@ def _nearest_blended(emb_full, emb_pos, full_centroids, pos_centroids, labels):
 
 
 def batch_classify(sentences, model, store):
-    """Batch-encode all sentences at once, then classify each.
-    Batch encoding is orders of magnitude faster than per-sentence for large corpora.
+    """Batch-encode all sentences, classify intent/tone/domain.
     Returns a list of (intent, tone, domain) tuples.
     """
-    # Batch-encode full texts
-    embs_full = model.encode(sentences, batch_size=64, show_progress_bar=False)
-
-    # POS-filtered texts per tag set
-    intent_texts = [_pos_filter(s, _INTENT_TAGS) for s in sentences]
-    tone_texts   = [_pos_filter(s, _TONE_TAGS)   for s in sentences]
-    embs_intent  = model.encode(intent_texts, batch_size=64, show_progress_bar=False)
-    embs_tone    = model.encode(tone_texts,   batch_size=64, show_progress_bar=False)
+    embs_full   = model.encode(sentences,                                        batch_size=64, show_progress_bar=False)
+    embs_intent = model.encode([_pos_filter(s, _INTENT_TAGS) for s in sentences], batch_size=64, show_progress_bar=False)
+    embs_tone   = model.encode([_pos_filter(s, _TONE_TAGS)   for s in sentences], batch_size=64, show_progress_bar=False)
 
     has_domain = "domain_labels" in store
     if has_domain:
-        domain_texts = [_pos_filter(s, _DOMAIN_TAGS) for s in sentences]
-        embs_domain  = model.encode(domain_texts, batch_size=64, show_progress_bar=False)
+        embs_domain = model.encode([_pos_filter(s, _DOMAIN_TAGS) for s in sentences], batch_size=64, show_progress_bar=False)
 
     results = []
     for i in range(len(sentences)):
@@ -85,25 +61,44 @@ def batch_classify(sentences, model, store):
         tone   = _nearest_blended(embs_full[i].tolist(), embs_tone[i].tolist(),
                                   store["tone_full_centroids"], store["tone_pos_centroids"],
                                   store["tone_labels"])
-        if has_domain:
-            domain = _nearest_blended(embs_full[i].tolist(), embs_domain[i].tolist(),
-                                      store["domain_full_centroids"], store["domain_pos_centroids"],
-                                      store["domain_labels"])
-        else:
-            domain = "general"
+        domain = (_nearest_blended(embs_full[i].tolist(), embs_domain[i].tolist(),
+                                   store["domain_full_centroids"], store["domain_pos_centroids"],
+                                   store["domain_labels"])
+                  if has_domain else "general")
         results.append((intent, tone, domain))
     return results
 
 
+def extract_date(text):
+    match = re.search(r'\b(10|11|12|13|14|15|16|17|18|19|20)\d{2}\b', text)
+    if match:
+        return int(match.group(0))
+    return None
+
+
 def main():
+    # ── Pass 1: tokenize Wikipedia corpus into sentences (CPU / NLTK) ────────
     try:
         with open('../data/corpus_wiki.txt', 'r', encoding='utf-8') as f:
             paragraphs = f.read().split('\n')
     except Exception as e:
-        print("Missing Wikipedia Corpus!", flush=True)
+        print(f"  [INGEST_WIKI]: Missing Wikipedia corpus: {e}", flush=True)
         return
 
-    # Attempt centroid model load for symmetric classification.
+    print(f"  [INGEST_WIKI]: Tokenizing {len(paragraphs):,} paragraphs …", flush=True)
+    para_sentences = []
+    all_sentences  = []
+    for para in paragraphs:
+        if not para.strip():
+            continue
+        sents = nltk.sent_tokenize(para)
+        if sents:
+            para_sentences.append(sents)
+            all_sentences.extend(sents)
+
+    print(f"  [INGEST_WIKI]: {len(all_sentences):,} sentences across {len(para_sentences):,} paragraphs", flush=True)
+
+    # ── Pass 2: encode & classify intent / tone / domain (GPU / torch) ───────
     clf_model = None
     clf_store = None
     try:
@@ -116,42 +111,54 @@ def main():
     except Exception as e:
         print(f"  [INGEST_WIKI]: Centroid model unavailable ({e}) — using statement/neutral/general fallback.", flush=True)
 
+    if clf_model is not None and clf_store is not None:
+        classifications = []
+        for i, sents in enumerate(para_sentences):
+            classifications.extend(batch_classify(sents, clf_model, clf_store))
+            if i % 500 == 0:
+                print(f"  [INGEST_WIKI]: Classified {i:,}/{len(para_sentences):,} paragraphs …", flush=True)
+    else:
+        classifications = [("statement", "neutral", "general")] * len(all_sentences)
+
+    # Release torch model before spaCy runs (avoids loky semaphore conflict
+    # on Python 3.14).
+    del clf_model
+
+    # ── Pass 3: spaCy NER (identical logic to classify_query.py) ─────────────
+    print(f"  [INGEST_WIKI]: Extracting entities with spaCy (batch) …", flush=True)
+    entity_lists = []
+    try:
+        import spacy
+        nlp = spacy.load("en_core_web_sm")
+        for doc in nlp.pipe(all_sentences, batch_size=256):
+            entity_lists.append([ent.text for ent in doc.ents if ent.label_ in NER_TYPES])
+    except (ImportError, OSError) as e:
+        print(f"  [INGEST_WIKI]: spaCy unavailable ({e}) — entities will be empty.", flush=True)
+        entity_lists = [[] for _ in all_sentences]
+
+    # ── Pass 4: date extraction + assemble output ─────────────────────────────
     processed_data = []
-    print(f"  [INGEST_WIKI]: Processing {len(paragraphs)} Massive Wikipedia Articles...", flush=True)
-
-    for i, para in enumerate(paragraphs):
-        if not para.strip(): continue
-
-        sentences = nltk.sent_tokenize(para)
-
-        # Batch-classify all sentences in this paragraph at once.
-        if clf_model is not None and clf_store is not None and sentences:
-            classifications = batch_classify(sentences, clf_model, clf_store)
-        else:
-            classifications = [("statement", "neutral", "general")] * len(sentences)
-
-        for seq, (sent, (intent, tone, domain)) in enumerate(zip(sentences, classifications)):
-            tokens   = nltk.word_tokenize(sent)
-            entities = extract_entities(sent)
-            dated    = extract_date(sent)
-
+    cls_iter    = iter(classifications)
+    entity_iter = iter(entity_lists)
+    for sents in para_sentences:
+        for seq, sent in enumerate(sents):
+            intent, tone, domain = next(cls_iter)
+            entities = next(entity_iter)
             processed_data.append({
                 "sequence_id": seq,
-                "text": sent,
-                "tokens": tokens,
-                "intent": intent,
-                "tone": tone,
-                "domain": domain,
-                "entities": entities,
-                "dated": dated
+                "text":        sent,
+                "tokens":      nltk.word_tokenize(sent),
+                "intent":      intent,
+                "tone":        tone,
+                "domain":      domain,
+                "entities":    entities,
+                "dated":       extract_date(sent),
             })
-
-        if i % 500 == 0:
-            print(f"  [INGEST_WIKI]: Parsed {i} documents into geometric structural queues...", flush=True)
 
     with open('../data/corpus_wiki_tmp.json', 'w', encoding='utf-8') as f:
         json.dump(processed_data, f, indent=2)
-    print("Wikipedia Ingestion Complete! Exported thousands of nodes to data/corpus_wiki_tmp.json", flush=True)
+    print(f"  [INGEST_WIKI]: Complete — {len(processed_data):,} sentences exported to data/corpus_wiki_tmp.json", flush=True)
+
 
 if __name__ == "__main__":
     main()
