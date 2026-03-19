@@ -6,6 +6,6 @@ datasets==4.8.2
 transformers==5.3.0
 spacy==3.8.11
 flask==3.1.3
-# torch is pre-installed in the pytorch/pytorch base image (with CUDA).
-# Listed here so local non-Docker runs still work.
-torch==2.3.0
+# torch is installed separately in the Dockerfile with the correct wheel
+# index for the target GPU (CUDA / ROCm / CPU).
+# For local non-Docker runs: pip install torch (picks up the right build automatically).

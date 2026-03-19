@@ -1,6 +1,14 @@
 services:
   spse:
-    build: .
+    build:
+      context: .
+      args:
+        # GPU=cpu      → no GPU, works everywhere (default)
+        # GPU=cuda121  → NVIDIA, CUDA 12.1  (most modern NVIDIA cards)
+        # GPU=cuda118  → NVIDIA, CUDA 11.8  (older drivers)
+        # GPU=rocm61   → AMD,    ROCm 6.1   (Linux only)
+        # Apple Silicon (MPS): run natively on macOS, not via Docker
+        GPU: ${GPU:-cpu}
     ports:
       - "5001:5000"
     volumes:
@@ -9,12 +17,24 @@ services:
     environment:
       PORT: "5000"
     restart: unless-stopped
-    # ── GPU passthrough (requires NVIDIA Container Toolkit on the host) ────────
-    # If no GPU is present, Docker ignores this block gracefully — CPU is used.
-    deploy:
-      resources:
-        reservations:
-          devices:
-            - driver: nvidia
-              count: all
-              capabilities: [gpu]
+    # ── NVIDIA GPU passthrough ─────────────────────────────────────────────────
+    # Requires NVIDIA Container Toolkit: https://docs.nvidia.com/datacenter/cloud-native/container-toolkit/install-guide.html
+    # Set GPU=cuda121 (or cuda118) in the build args above, then uncomment:
+    #
+    # deploy:
+    #   resources:
+    #     reservations:
+    #       devices:
+    #         - driver: nvidia
+    #           count: all
+    #           capabilities: [gpu]
+    #
+    # ── AMD ROCm GPU passthrough ───────────────────────────────────────────────
+    # Requires ROCm drivers on the host. Set GPU=rocm61 above, then uncomment:
+    #
+    # devices:
+    #   - /dev/kfd
+    #   - /dev/dri
+    # group_add:
+    #   - video
+    #   - render

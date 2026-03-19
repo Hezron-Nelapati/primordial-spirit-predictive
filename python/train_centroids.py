@@ -113,10 +113,9 @@ def main():
         nltk.download("averaged_perceptron_tagger_eng", quiet=True)
         nltk.download("punkt_tab", quiet=True)
 
-    import torch
-    _device = "cuda" if torch.cuda.is_available() else "cpu"
-    print(f"Loading sentence-transformer model (device: {_device})...")
-    model = SentenceTransformer("all-MiniLM-L6-v2", device=_device)
+    from gpu_utils import get_device
+    print("Loading sentence-transformer model...")
+    model = SentenceTransformer("all-MiniLM-L6-v2", device=get_device())
 
     # -----------------------------------------------------------------------
     # Load corpus sentences

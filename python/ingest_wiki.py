@@ -100,11 +100,9 @@ def main():
     clf_model = None
     clf_store = None
     try:
-        import torch
         from sentence_transformers import SentenceTransformer
-        _device = "cuda" if torch.cuda.is_available() else "cpu"
-        print(f"  [INGEST_WIKI]: Using device: {_device}")
-        clf_model = SentenceTransformer("all-MiniLM-L6-v2", device=_device)
+        from gpu_utils import get_device
+        clf_model = SentenceTransformer("all-MiniLM-L6-v2", device=get_device())
         with open("../data/centroids.json") as f:
             clf_store = json.load(f)
         print("  [INGEST_WIKI]: Centroid model loaded — using symmetric classification.")

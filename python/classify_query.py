@@ -98,10 +98,9 @@ def _keyword_domain(text: str) -> str:
 def _get_model() -> SentenceTransformer:
     global _model
     if _model is None:
-        import torch
-        _device = "cuda" if torch.cuda.is_available() else "cpu"
-        print(f"  [classify_query]: loading sentence-transformer model (device: {_device})…", file=sys.stderr)
-        _model = SentenceTransformer("all-MiniLM-L6-v2", device=_device)
+        from gpu_utils import get_device
+        print("  [classify_query]: loading sentence-transformer model…", file=sys.stderr)
+        _model = SentenceTransformer("all-MiniLM-L6-v2", device=get_device())
     return _model
 
 
