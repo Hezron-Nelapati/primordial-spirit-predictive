@@ -1,6 +1,9 @@
 /target
 data/graph.*
-data/v2_corpus_reinforced.json
+data/corpus.json
+data/corpus_reinforced.json
+data/corpus_v2_tmp.json
+data/corpus_v3_tmp.json
 data/centroids.json
 __pycache__/
 *.pyc

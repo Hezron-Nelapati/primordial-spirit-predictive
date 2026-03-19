@@ -27,6 +27,13 @@ from flask import Flask, Response, jsonify, render_template, request, session
 
 app = Flask(__name__)
 
+ROOT       = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
+PYTHON_DIR = os.path.join(ROOT, "python")
+BINARY     = os.environ.get(
+    "SPSE_BINARY",
+    os.path.join(ROOT, "target", "release", "spse_predictive"),
+)
+
 # Fix #19: persist the Flask secret to a local file so sessions survive server
 # restarts. Generate a new secret only if the file doesn't exist yet.
 _SECRET_FILE = os.path.join(ROOT, ".flask_secret")
@@ -44,12 +51,6 @@ else:
         pass  # non-critical; session loss only if file cannot be written
     app.secret_key = _new_secret
 
-ROOT       = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
-PYTHON_DIR = os.path.join(ROOT, "python")
-BINARY     = os.environ.get(
-    "SPSE_BINARY",
-    os.path.join(ROOT, "target", "release", "spse_predictive"),
-)
 
 # ── In-process Python models ──────────────────────────────────────────────────
 # Add python/ to path so we can import classify_query and minillm_wrapper directly.
@@ -304,22 +305,23 @@ def train_start():
         # graph DB and centroids are used immediately — without this, the old
         # process keeps serving the deleted graph.db until the server restarts.
         if proc.returncode == 0:
-            try:
-                import classify_query as _cq
-                _cq.reset_store()
-                print("[FLASK] Centroids cache invalidated after training.", flush=True)
-            except Exception as exc:
-                print(f"[FLASK] Could not reset centroids cache: {exc}", flush=True)
+            if _classify is not None:
+                try:
+                    _classify.reset_store()
+                    print("[FLASK] Centroids cache invalidated after training.", flush=True)
+                except Exception as exc:
+                    print(f"[FLASK] Could not reset centroids cache: {exc}", flush=True)
             print("[FLASK] Restarting Rust graph engine with new corpus...", flush=True)
             global _rust_proc, _rust_ready
-            if _rust_proc is not None:
-                try:
-                    _rust_proc.terminate()
-                    _rust_proc.wait(timeout=10)
-                except Exception:
-                    pass
-            _rust_ready = False
-            _rust_proc = None
+            with _rust_lock:
+                if _rust_proc is not None:
+                    try:
+                        _rust_proc.terminate()
+                        _rust_proc.wait(timeout=10)
+                    except Exception:
+                        pass
+                _rust_ready = False
+                _rust_proc = None
             _start_rust()
 
     threading.Thread(target=_run, daemon=True).start()

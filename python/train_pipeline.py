@@ -4,11 +4,12 @@ Automated training pipeline for SPSE Predictive.
 
 Steps (in order):
   1. Check / download corpus data
-  2. Run V2 ingest     → data/v2_corpus.json
-  3. Reinforce edges   → duplicate entries N times for heavier edge weights
-  4. Run V3 ingest     → data/v3_corpus.json  (skipped if corpus absent)
-  5. Train centroids   → data/centroids.json
-  6. Reset graph.db    → so Rust rebuilds from reinforced corpus on next query
+  2. Run V2 ingest     → data/corpus_v2_tmp.json  (intermediate)
+  3. Run V3 ingest     → data/corpus_v3_tmp.json  (intermediate, optional)
+  4. Merge all         → data/corpus.json          (unified)
+  5. Reinforce edges   → data/corpus_reinforced.json
+  6. Train centroids   → data/centroids.json
+  7. Reset graph.db    → so Rust rebuilds from reinforced corpus on next query
 
 Progress lines (parsed by Flask SSE stream):
   [STEP]     Major step starting
@@ -17,19 +18,20 @@ Progress lines (parsed by Flask SSE stream):
   [WARN]     Non-fatal warning
   [ERROR]    Fatal error — script exits with code 1
 """
-import argparse, json, os, subprocess, sys
+import argparse, json, os, shutil, subprocess, sys
 
 ROOT        = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 PYTHON_DIR  = os.path.join(ROOT, "python")
 DATA_DIR    = os.path.join(ROOT, "data")
 
-V2_CORPUS_TXT        = os.path.join(DATA_DIR, "corpus_v2.txt")
-V3_CORPUS_TXT        = os.path.join(DATA_DIR, "corpus_v3_massive.txt")
-V2_CORPUS_JSON       = os.path.join(DATA_DIR, "v2_corpus.json")
-V2_CORPUS_REINFORCED = os.path.join(DATA_DIR, "v2_corpus_reinforced.json")
-V3_CORPUS_JSON       = os.path.join(DATA_DIR, "v3_corpus.json")
-CENTROIDS_JSON       = os.path.join(DATA_DIR, "centroids.json")
-GRAPH_DB             = os.path.join(DATA_DIR, "graph.db")
+V2_CORPUS_TXT       = os.path.join(DATA_DIR, "corpus_v2.txt")
+V3_CORPUS_TXT       = os.path.join(DATA_DIR, "corpus_v3_massive.txt")
+V2_TMP_JSON         = os.path.join(DATA_DIR, "corpus_v2_tmp.json")   # intermediate
+V3_TMP_JSON         = os.path.join(DATA_DIR, "corpus_v3_tmp.json")   # intermediate
+CORPUS_JSON         = os.path.join(DATA_DIR, "corpus.json")          # merged output
+CORPUS_REINFORCED   = os.path.join(DATA_DIR, "corpus_reinforced.json")
+CENTROIDS_JSON      = os.path.join(DATA_DIR, "centroids.json")
+GRAPH_DB            = os.path.join(DATA_DIR, "graph.db")
 
 
 def log(tag: str, msg: str) -> None:
@@ -54,12 +56,11 @@ def run_script(script_name: str) -> int:
 def reinforce_corpus(src: str, dest: str, passes: int) -> None:
     """Write reinforced corpus to `dest` (src × passes), leaving `src` untouched.
     Writing to a separate file prevents compounding on re-runs: src is always the
-    freshly-ingested single-pass output from v2_ingest.py."""
+    freshly-merged single-pass output."""
     with open(src, encoding="utf-8") as f:
         rows = json.load(f)
     if not isinstance(rows, list) or passes <= 1:
         # No reinforcement needed — copy src verbatim so Rust always reads dest.
-        import shutil
         shutil.copy2(src, dest)
         return
     reinforced = rows * passes
@@ -107,37 +108,68 @@ def main() -> None:
         log("DONE", "V3 Wikipedia corpus (corpus_v3_massive.txt) already present")
 
     # ── Step 2: V2 ingest ────────────────────────────────────────────────────
-    log("STEP", "Running V2 corpus ingest → data/v2_corpus.json")
+    log("STEP", "Running V2 corpus ingest")
     rc = run_script("v2_ingest.py")
     if rc != 0:
         log("ERROR", "V2 ingest failed (see output above)")
         sys.exit(1)
     log("DONE", "V2 ingest complete")
 
-    # ── Step 3: Edge reinforcement ────────────────────────────────────────────
-    log("STEP", f"Reinforcing graph edges ({passes}× passes)")
-    log("PROGRESS", "  Writing reinforced corpus to v2_corpus_reinforced.json (source unchanged) …")
-    try:
-        reinforce_corpus(V2_CORPUS_JSON, V2_CORPUS_REINFORCED, passes)
-        log("DONE", f"Edge reinforcement complete ({passes}× → {V2_CORPUS_REINFORCED})")
-    except Exception as exc:
-        log("WARN", f"Edge reinforcement failed ({exc}) — copying source corpus as fallback")
-        import shutil
-        shutil.copy2(V2_CORPUS_JSON, V2_CORPUS_REINFORCED)
-
-    # ── Step 4: V3 ingest (optional) ─────────────────────────────────────────
+    # ── Step 3: V3 ingest (optional) ─────────────────────────────────────────
     if v3_present:
-        log("STEP", "Running V3 Wikipedia ingest → data/v3_corpus.json  (slow)")
+        log("STEP", "Running V3 Wikipedia ingest (slow)")
         log("PROGRESS", "  This processes the full Wikipedia corpus — may take 10–30 min.")
         rc = run_script("v3_ingest.py")
         if rc != 0:
             log("WARN", "V3 ingest failed — the system will still work without V3 data")
+            v3_present = False
         else:
             log("DONE", "V3 ingest complete")
     else:
         log("STEP", "V3 corpus absent — skipping V3 ingest")
 
-    # ── Step 5: Train centroids ───────────────────────────────────────────────
+    # ── Step 4: Merge into unified corpus.json ───────────────────────────────
+    log("STEP", "Merging ingested corpora → data/corpus.json")
+    merged_data = []
+    try:
+        with open(V2_TMP_JSON, encoding="utf-8") as f:
+            merged_data.extend(json.load(f))
+        log("PROGRESS", f"  Added {len(merged_data)} entries from V2 ingest.")
+    except FileNotFoundError:
+        log("ERROR", f"V2 ingest output not found: {V2_TMP_JSON}")
+        sys.exit(1)
+
+    if v3_present:
+        try:
+            with open(V3_TMP_JSON, encoding="utf-8") as f:
+                v3_data = json.load(f)
+                merged_data.extend(v3_data)
+            log("PROGRESS", f"  Added {len(v3_data)} entries from V3 ingest. Total: {len(merged_data)}")
+        except FileNotFoundError:
+            log("WARN", f"V3 ingest output not found: {V3_TMP_JSON} — skipping.")
+        except json.JSONDecodeError:
+            log("WARN", f"V3 ingest output is not valid JSON — skipping.")
+
+    with open(CORPUS_JSON, "w", encoding="utf-8") as f:
+        json.dump(merged_data, f)
+    log("DONE", f"Unified corpus created: {len(merged_data)} entries → data/corpus.json")
+
+    # Clean up intermediate ingest files
+    for tmp in (V2_TMP_JSON, V3_TMP_JSON):
+        if os.path.exists(tmp):
+            os.remove(tmp)
+
+    # ── Step 5: Edge reinforcement ────────────────────────────────────────────
+    log("STEP", f"Reinforcing graph edges ({passes}× passes)")
+    log("PROGRESS", "  Writing reinforced corpus to corpus_reinforced.json (source unchanged) …")
+    try:
+        reinforce_corpus(CORPUS_JSON, CORPUS_REINFORCED, passes)
+        log("DONE", f"Edge reinforcement complete ({passes}× → data/corpus_reinforced.json)")
+    except Exception as exc:
+        log("WARN", f"Edge reinforcement failed ({exc}) — copying source corpus as fallback")
+        shutil.copy2(CORPUS_JSON, CORPUS_REINFORCED)
+
+    # ── Step 6: Train centroids ───────────────────────────────────────────────
     log("STEP", "Training centroid classifier → data/centroids.json")
     log("PROGRESS", "  Loading all-MiniLM-L6-v2 and encoding corpus …")
     rc = run_script("train_centroids.py")
@@ -146,7 +178,9 @@ def main() -> None:
         sys.exit(1)
     log("DONE", "Centroid training complete")
 
-    # ── Step 6: Reset graph database ─────────────────────────────────────────
+    # ── Step 7: Reset graph database ─────────────────────────────────────────
+    # Rust reads corpus_reinforced.json (or corpus.json as fallback) at startup
+    # when graph.db is absent.  Removing the DB forces a fresh ingest.
     log("STEP", "Resetting graph database")
     if os.path.exists(GRAPH_DB):
         os.remove(GRAPH_DB)

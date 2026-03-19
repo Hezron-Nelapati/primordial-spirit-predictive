@@ -12,7 +12,7 @@ use crate::graph::{GraphAccess, NodeId, WordEdge, WordNode};
 // `dated` is stored as INTEGER with -1 as the sentinel for "no date" (NULL
 // would prevent deduplication via UNIQUE INDEX since NULL != NULL in SQL).
 //
-// Edge deduplication mirrors ingest_v2_rows: same (from, to, intent, domain,
+// Edge deduplication mirrors ingest_rows: same (from, to, intent, domain,
 // dated) tuple → reinforce weight by 1.0 rather than inserting a duplicate.
 // ---------------------------------------------------------------------------
 

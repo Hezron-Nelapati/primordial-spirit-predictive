@@ -3,13 +3,13 @@ use crate::graph::{GraphAccess, WordGraph, WordNode, WordEdge};
 use serde::Deserialize;
 
 // ---------------------------------------------------------------------------
-// V2 JSON corpus schema
+// Corpus JSON schema
 // ---------------------------------------------------------------------------
 
-/// Deserialisation target for a single row in `data/v2_corpus.json`
-/// (and `data/v3_corpus.json`, which shares the same schema).
+/// Deserialisation target for a single row in the corpus JSON produced by the
+/// Python ingest pipeline (`data/corpus.json` or `data/corpus_reinforced.json`).
 #[derive(Deserialize, Debug)]
-pub struct V2JsonData {
+pub struct CorpusRow {
     pub text:     String,
     pub tokens:   Vec<String>,
     pub intent:   String,
@@ -20,7 +20,7 @@ pub struct V2JsonData {
 }
 
 // ---------------------------------------------------------------------------
-// V2 / V3 corpus ingestion
+// Corpus ingestion
 // ---------------------------------------------------------------------------
 
 /// Ingest a slice of deserialised JSON rows into an existing graph.
@@ -33,7 +33,7 @@ pub struct V2JsonData {
 ///
 /// Different intent/domain combinations for the same token pair are preserved
 /// as distinct edges so that multi-signal routing can select among them.
-pub fn ingest_v2_rows(graph: &mut WordGraph, rows: Vec<V2JsonData>) {
+pub fn ingest_rows(graph: &mut WordGraph, rows: Vec<CorpusRow>) {
     for row in rows {
         let mut prev_id: Option<u64> = None;
         for token in row.tokens {
@@ -89,11 +89,11 @@ pub fn ingest_v2_rows(graph: &mut WordGraph, rows: Vec<V2JsonData>) {
 /// Ingest corpus rows into a SQLite `GraphDb` rather than an in-memory
 /// `WordGraph`.  Identical `(from, to, intent, domain, dated)` edges have
 /// their weight reinforced by 1.0 via an `ON CONFLICT DO UPDATE` upsert,
-/// exactly mirroring the deduplication logic of `ingest_v2_rows`.
+/// exactly mirroring the deduplication logic of `ingest_rows`.
 ///
 /// Wraps the entire batch in a single transaction for throughput — avoids
 /// one fsync per row which would be orders of magnitude slower on large corpora.
-pub fn ingest_v2_to_db(db: &GraphDb, rows: Vec<V2JsonData>) {
+pub fn ingest_to_db(db: &GraphDb, rows: Vec<CorpusRow>) {
     // Fix #9: propagate begin/commit errors rather than silently discarding.
     // If BEGIN fails (e.g. database locked), abort before writing any rows.
     if let Err(e) = db.begin() {

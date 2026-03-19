@@ -1,6 +1,6 @@
 use spse_predictive::db::GraphDb;
 use spse_predictive::graph::GraphAccess;
-use spse_predictive::ingest::{ingest_v2_to_db, V2JsonData};
+use spse_predictive::ingest::{ingest_to_db, CorpusRow};
 use spse_predictive::reasoning::{ReasoningModule, SessionalMemory};
 use spse_predictive::spatial::SpatialGrid;
 use spse_predictive::reasoning::{evaluate_arithmetic, extract_year_from_query, is_arithmetic_query};
@@ -336,54 +336,34 @@ fn main() {
     // Skip when the DB already has nodes (a previous run built it).
     if db.node_count() == 0 {
         eprintln!("[GRAPH] Empty DB — running first-run ingest...");
-        // Prefer the reinforced corpus (written by train_pipeline.py) to get
-        // edge weights that reflect the configured number of passes.  Fall back
-        // to the single-pass v2_corpus.json when training hasn't been run yet.
-        let v2_path = if fs::metadata("data/v2_corpus_reinforced.json").is_ok() {
-            eprintln!("[GRAPH] Using reinforced corpus: data/v2_corpus_reinforced.json");
-            "data/v2_corpus_reinforced.json"
+        // Prefer the reinforced corpus (written by train_pipeline.py) which
+        // already merges all source corpora and applies edge-weight passes.
+        // Fall back to the single-pass corpus.json when training hasn't run yet.
+        let corpus_path = if fs::metadata("data/corpus_reinforced.json").is_ok() {
+            eprintln!("[GRAPH] Using reinforced corpus: data/corpus_reinforced.json");
+            "data/corpus_reinforced.json"
         } else {
-            eprintln!("[GRAPH] Using single-pass corpus: data/v2_corpus.json");
-            "data/v2_corpus.json"
+            eprintln!("[GRAPH] Using single-pass corpus: data/corpus.json");
+            "data/corpus.json"
         };
-        let v2_data = match fs::read_to_string(v2_path) {
+        let raw_data = match fs::read_to_string(corpus_path) {
             Ok(d) => d,
             Err(e) => {
-                eprintln!("[FATAL] {} missing or unreadable: {}", v2_path, e);
-                eprintln!("[FATAL] Run `cd python && python3 v2_ingest.py` first.");
+                eprintln!("[FATAL] {} missing or unreadable: {}", corpus_path, e);
+                eprintln!("[FATAL] Run the training pipeline first: python3 python/train_pipeline.py");
                 std::process::exit(1);
             }
         };
-        let v2_rows: Vec<V2JsonData> = match serde_json::from_str(&v2_data) {
+        let rows: Vec<CorpusRow> = match serde_json::from_str(&raw_data) {
             Ok(r) => r,
             Err(e) => {
-                eprintln!("[FATAL] v2_corpus.json parse error: {}", e);
+                eprintln!("[FATAL] {} parse error: {}", corpus_path, e);
                 std::process::exit(1);
             }
         };
-        let v2_count = v2_rows.len();
-        ingest_v2_to_db(&db, v2_rows);
-
-        let v3_path = "data/v3_corpus.json";
-        let v3_msg = if fs::metadata(v3_path).is_ok() {
-            match fs::read_to_string(v3_path)
-                .map_err(|e| e.to_string())
-                .and_then(|d| serde_json::from_str::<Vec<V2JsonData>>(&d).map_err(|e| e.to_string()))
-            {
-                Ok(v3_rows) => {
-                    let n = v3_rows.len();
-                    ingest_v2_to_db(&db, v3_rows);
-                    format!(" + V3 ({} sequences)", n)
-                }
-                Err(e) => {
-                    eprintln!("[WARN] Could not load {}: {}", v3_path, e);
-                    String::new()
-                }
-            }
-        } else {
-            String::new()
-        };
-        eprintln!("[GRAPH] First-run ingest: V2 ({} sequences){} → DB built.", v2_count, v3_msg);
+        let count = rows.len();
+        ingest_to_db(&db, rows);
+        eprintln!("[GRAPH] First-run ingest: {} sequences from {} → DB built.", count, corpus_path);
     }
 
     // Build 3D spatial index from all node positions in the DB.

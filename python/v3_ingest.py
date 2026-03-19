@@ -141,9 +141,9 @@ def main():
         if i % 500 == 0:
             print(f"  [PYTHON_INGEST]: Parsed {i} documents into geometric structural queues...")
 
-    with open('../data/v3_corpus.json', 'w', encoding='utf-8') as f:
+    with open('../data/corpus_v3_tmp.json', 'w', encoding='utf-8') as f:
         json.dump(processed_data, f, indent=2)
-    print("✅ V3 Python Ingestion Complete! Exported thousands of nodes to data/v3_corpus.json")
+    print("V3 Python Ingestion Complete! Exported thousands of nodes to data/corpus_v3_tmp.json")
 
 if __name__ == "__main__":
     main()

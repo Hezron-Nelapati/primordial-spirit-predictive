@@ -119,9 +119,12 @@ def main():
     # -----------------------------------------------------------------------
     # Load corpus sentences
     # train_centroids.py lives in python/, corpora are in data/
+    # Prefer reinforced corpus (produced by pipeline step 5); fall back to
+    # single-pass corpus.json so standalone runs still work.
     # -----------------------------------------------------------------------
-    corpus_rows = load_corpus("../data/v2_corpus.json")
-    corpus_rows += load_corpus("../data/v3_corpus.json")  # empty list if absent
+    reinforced = "../data/corpus_reinforced.json"
+    fallback   = "../data/corpus.json"
+    corpus_rows = load_corpus(reinforced) if os.path.exists(reinforced) else load_corpus(fallback)
 
     # -----------------------------------------------------------------------
     # Build training sets
