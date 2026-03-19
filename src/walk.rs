@@ -19,10 +19,14 @@ pub enum WalkMode {
 
 impl WalkMode {
     /// Derive the appropriate walk mode from an intent label.
+    ///
+    /// `"complaint"` maps to `Question` because both intents are answer-seeking:
+    /// the walker must bridge toward an entity anchor rather than extend the chain
+    /// linearly (implementation_plan.md §4 "Answer-Seeking Intent").
     pub fn from_intent(intent: &str) -> Self {
         match intent {
             "explain" => WalkMode::Explain,
-            "question" => WalkMode::Question,
+            "question" | "complaint" => WalkMode::Question,
             _ => WalkMode::Forward,
         }
     }
@@ -114,10 +118,28 @@ pub fn predict_next<'a>(
         }
     }
 
-    // Tier 3: Backtrack-and-reroute.
-    // Find ancestor nodes (nodes with edges pointing to current_id), then collect
-    // their *other* outgoing edges (not back to current_id) and score them.
-    // This escapes dead-ends that Tier 1 and Tier 2 could not resolve.
+    // Tier 3: A* spatial bridge (Question/Complaint) or backtrack-and-reroute.
+    //
+    // For answer-seeking intents (Question mode), the architecture specifies a
+    // spatial A* jump toward the entity anchor rather than a linear backtrack
+    // (implementation_plan.md §4, walkthrough.md §2.4).  We compute the midpoint
+    // between the current node and the entity anchor in 3D space and use the
+    // KD-tree to find the nearest bridge node at that location.  If the bridge
+    // node is valid and not the current node, we return it directly.
+    //
+    // For all other modes (or when spatial / entity are unavailable), the classic
+    // backtrack-reroute runs as before: find ancestors and pick from their
+    // alternative outgoing edges.
+    if config.mode == WalkMode::Question {
+        if let Some(grid) = spatial {
+            if let Some(bridge) = spatial_a_star_bridge(current_id, active_entity, graph, grid) {
+                println!("    [TIER_3] Question A* bridge → spatial midpoint jump to [{}].", bridge);
+                return Some(bridge);
+            }
+        }
+    }
+
+    // Classic backtrack-reroute (all modes, and Question fallback when bridge fails).
     let ancestor_ids: HashSet<u64> = graph.edges.iter()
         .filter(|e| e.to == current_id)
         .map(|e| e.from)
@@ -253,6 +275,47 @@ fn score_edges<'a>(
     }
 
     best_edge.and_then(|e| graph.nodes.get(&e.to).map(|n| n.surface.as_str()))
+}
+
+/// Spatial A* bridge for answer-seeking (Question/Complaint) Tier 3.
+///
+/// Computes the midpoint in 3D space between the current node and the active
+/// entity anchor, then queries the KD-tree for the node nearest to that
+/// midpoint.  This spatially jumps the walk toward the entity cluster without
+/// requiring a graph-edge path between them — bridging conceptual islands the
+/// way `implementation_plan.md §4` specifies for question-intent Tier 3.
+///
+/// Returns `None` when:
+/// - The entity anchor is unknown or not in the graph.
+/// - The nearest node is the current node itself (no progress).
+/// - The bridge node has no outgoing edges (would immediately dead-end again).
+fn spatial_a_star_bridge<'a>(
+    current_id: u64,
+    entity_word: &str,
+    graph: &'a WordGraph,
+    grid: &SpatialGrid,
+) -> Option<&'a str> {
+    let entity_id = graph.by_surface.get(entity_word)?;
+    let current_pos = graph.nodes.get(&current_id)?.position;
+    let entity_pos  = graph.nodes.get(entity_id)?.position;
+
+    // Midpoint in 3D between current and entity anchor.
+    let midpoint = [
+        (current_pos[0] + entity_pos[0]) / 2.0,
+        (current_pos[1] + entity_pos[1]) / 2.0,
+        (current_pos[2] + entity_pos[2]) / 2.0,
+    ];
+
+    // Large search radius (50.0) guarantees a hit: positions span x∈[1,20+],
+    // y/z∈[0,1], so max inter-node distance is < 25.
+    let bridge_id = grid.query_nearest(midpoint, 50.0)?;
+
+    if bridge_id == current_id { return None; }
+
+    // Only bridge to nodes that have outgoing edges — avoids instant re-dead-end.
+    if !graph.edges.iter().any(|e| e.from == bridge_id) { return None; }
+
+    graph.nodes.get(&bridge_id).map(|n| n.surface.as_str())
 }
 
 fn euclidean_dist_5(a: &[f32; 5], b: &[f32; 5]) -> f32 {

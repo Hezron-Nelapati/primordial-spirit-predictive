@@ -143,6 +143,30 @@ pub fn evaluate_arithmetic(query: &str) -> Option<String> {
     None
 }
 
+/// Extract a calendar year from a natural-language query string.
+///
+/// Scans for a standalone 4-digit token that falls within the plausible range
+/// `1900–2099`.  Returns the first match found, or `None` if no year is present.
+///
+/// The range guard prevents false positives from model numbers ("A100"),
+/// version strings ("3.2024"), or large numeric values.
+///
+/// Used in the CLI path to populate `WalkConfig::target_year` automatically
+/// when the user does not supply a year as a positional argument.
+pub fn extract_year_from_query(query: &str) -> Option<u16> {
+    for raw in query.split_whitespace() {
+        let token = raw.trim_matches(|c: char| c.is_ascii_punctuation());
+        if token.len() == 4 {
+            if let Ok(year) = token.parse::<u16>() {
+                if (1900..=2099).contains(&year) {
+                    return Some(year);
+                }
+            }
+        }
+    }
+    None
+}
+
 pub struct SessionalMemory {
     pub intent_stack: Vec<String>,
     pub tone_stack: Vec<String>,

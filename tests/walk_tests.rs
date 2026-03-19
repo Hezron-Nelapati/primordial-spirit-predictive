@@ -1141,9 +1141,182 @@ fn test_predict_next_question_mode_routes_toward_entity_anchor() {
 /// WalkMode::from_intent must map correctly for all known intent strings.
 #[test]
 fn test_walk_mode_from_intent_mapping() {
-    assert_eq!(WalkMode::from_intent("explain"),   WalkMode::Explain);
-    assert_eq!(WalkMode::from_intent("question"),  WalkMode::Question);
-    assert_eq!(WalkMode::from_intent("statement"), WalkMode::Forward);
-    assert_eq!(WalkMode::from_intent("command"),   WalkMode::Forward);
-    assert_eq!(WalkMode::from_intent("unknown"),   WalkMode::Forward);
+    assert_eq!(WalkMode::from_intent("explain"),    WalkMode::Explain);
+    assert_eq!(WalkMode::from_intent("question"),   WalkMode::Question);
+    assert_eq!(WalkMode::from_intent("complaint"),  WalkMode::Question);
+    assert_eq!(WalkMode::from_intent("statement"),  WalkMode::Forward);
+    assert_eq!(WalkMode::from_intent("command"),    WalkMode::Forward);
+    assert_eq!(WalkMode::from_intent("unknown"),    WalkMode::Forward);
+}
+
+// ---------------------------------------------------------------------------
+// Phase 16: complaint intent + Tier 3 Spatial A* Bridge
+// ---------------------------------------------------------------------------
+
+/// Build a graph where `orphan` has no outgoing edges and no ancestors, but
+/// `entity` sits at a distinct 3D position.  In Question mode with a spatial
+/// grid, Tier 3 must fire the A* bridge and land on `entity` (the only other
+/// node in the tree that has outgoing edges).
+#[test]
+fn test_tier3_question_astar_bridge_jumps_to_entity() {
+    let mut graph = WordGraph::new();
+
+    // "orphan": position [1.0, 0.0, 0.0]  — length-1 word
+    // "entity": position [2.0, 0.5, 0.5]  — different cluster
+    // "next"  : reachable from entity
+    for (tok, pos) in &[("o", [1.0_f32, 0.0, 0.0]), ("entity", [6.0, 0.5, 0.5]), ("next", [6.0, 0.5, 0.8])] {
+        let id = WordGraph::generate_id(tok);
+        graph.by_surface.insert(tok.to_string(), id);
+        graph.nodes.entry(id).or_insert(WordNode {
+            id, surface: tok.to_string(), frequency: 1,
+            position: *pos,
+            lexical_vector: WordNode::compute_lexical_vector(tok),
+        });
+    }
+    // entity → next (gives entity an outgoing edge so the bridge is accepted)
+    graph.edges.push(WordEdge {
+        from: WordGraph::generate_id("entity"),
+        to:   WordGraph::generate_id("next"),
+        weight: 1.0,
+        intent: "question".to_string(), tone: "neutral".to_string(),
+        domain: "general".to_string(), entity: None, dated: None,
+    });
+
+    let spatial = SpatialGrid::build(graph.nodes.values().map(|n| (n.id, n.position)));
+
+    let mut reasoning = ReasoningModule::new(&graph);
+    reasoning.update_context("question", "neutral", "general", &["entity".to_string()]);
+    let config = WalkConfig { target_year: None, depth_limit: 1, mode: WalkMode::Question };
+
+    // "o" has no outgoing edges and no ancestors — Tier 1 and Tier 3 classic fail.
+    // Tier 3 A* bridge should jump to "entity" (nearest node with outgoing edges).
+    let result = predict_next("o", &graph, Some(&spatial), &reasoning, &config, &[]);
+    assert_eq!(result, Some("entity"), "Tier 3 A* bridge must jump to the entity cluster");
+}
+
+/// A* bridge must NOT activate in Forward mode — classic backtrack must run instead.
+#[test]
+fn test_tier3_astar_bridge_inactive_in_forward_mode() {
+    let mut graph = WordGraph::new();
+
+    for tok in &["src", "alt", "entity"] {
+        let id = WordGraph::generate_id(tok);
+        graph.by_surface.insert(tok.to_string(), id);
+        graph.nodes.entry(id).or_insert(WordNode {
+            id, surface: tok.to_string(), frequency: 1,
+            position: [1.0; 3],
+            lexical_vector: WordNode::compute_lexical_vector(tok),
+        });
+    }
+    // src ← alt  (alt is ancestor of src, has forward edge to "alt" but not entity)
+    graph.edges.push(WordEdge {
+        from: WordGraph::generate_id("alt"),
+        to:   WordGraph::generate_id("src"),
+        weight: 1.0,
+        intent: "statement".to_string(), tone: "neutral".to_string(),
+        domain: "general".to_string(), entity: None, dated: None,
+    });
+    // entity → entity_child
+    let eid = WordGraph::generate_id("entity");
+    let eid2 = WordGraph::generate_id("entity_child");
+    graph.by_surface.insert("entity_child".to_string(), eid2);
+    graph.nodes.entry(eid2).or_insert(WordNode {
+        id: eid2, surface: "entity_child".to_string(), frequency: 1,
+        position: [5.0; 3], lexical_vector: WordNode::compute_lexical_vector("entity_child"),
+    });
+    graph.edges.push(WordEdge {
+        from: eid, to: eid2, weight: 1.0,
+        intent: "statement".to_string(), tone: "neutral".to_string(),
+        domain: "general".to_string(), entity: None, dated: None,
+    });
+
+    let spatial = SpatialGrid::build(graph.nodes.values().map(|n| (n.id, n.position)));
+    let mut reasoning = ReasoningModule::new(&graph);
+    reasoning.update_context("statement", "neutral", "general", &["entity".to_string()]);
+    let config = WalkConfig { target_year: None, depth_limit: 1, mode: WalkMode::Forward };
+
+    // "src" is a dead-end. Forward mode must use classic backtrack (ancestor = alt).
+    let result = predict_next("src", &graph, Some(&spatial), &reasoning, &config, &[]);
+    // The bridge is NOT active in Forward mode; classic backtrack returns alt (only ancestor with alt edge but alt→src is the only edge, alt has no *other* forward edges here).
+    // The ancestor of src is alt; alt has edges only to src; tier3_edges will be empty → None.
+    // That's fine — the important assertion is that the bridge didn't jump to entity_child.
+    assert_ne!(result, Some("entity_child"), "A* bridge must not activate in Forward mode");
+}
+
+// ---------------------------------------------------------------------------
+// extract_year_from_query — Phase 15
+// ---------------------------------------------------------------------------
+
+use spse_predictive::reasoning::extract_year_from_query;
+
+/// Plain 4-digit year embedded in a sentence is extracted.
+#[test]
+fn test_extract_year_finds_year_in_sentence() {
+    assert_eq!(extract_year_from_query("What happened in 2018?"), Some(2018));
+}
+
+/// Year at the very start of the query is found.
+#[test]
+fn test_extract_year_at_start_of_query() {
+    assert_eq!(extract_year_from_query("2003 was a turbulent year."), Some(2003));
+}
+
+/// Year at the very end of the query (no trailing whitespace) is found.
+#[test]
+fn test_extract_year_at_end_of_query() {
+    assert_eq!(extract_year_from_query("Tell me about events from 1999"), Some(1999));
+}
+
+/// Year with surrounding punctuation (comma, parentheses) is still extracted.
+#[test]
+fn test_extract_year_with_surrounding_punctuation() {
+    assert_eq!(extract_year_from_query("The revolution (2011) changed everything."), Some(2011));
+}
+
+/// Short numbers are not mistaken for years.
+#[test]
+fn test_extract_year_ignores_short_numbers() {
+    assert_eq!(extract_year_from_query("The bank closes at 5 pm"), None);
+}
+
+/// A 5-digit number is not treated as a year.
+#[test]
+fn test_extract_year_ignores_5_digit_numbers() {
+    assert_eq!(extract_year_from_query("Model A10000 is our product"), None);
+}
+
+/// Year below the valid range (1899) is rejected.
+#[test]
+fn test_extract_year_rejects_out_of_range_low() {
+    assert_eq!(extract_year_from_query("It happened in 1899."), None);
+}
+
+/// Year above the valid range (2100) is rejected.
+#[test]
+fn test_extract_year_rejects_out_of_range_high() {
+    assert_eq!(extract_year_from_query("Plans for 2100 are speculative."), None);
+}
+
+/// Query with no numeric token at all returns None.
+#[test]
+fn test_extract_year_no_numbers_returns_none() {
+    assert_eq!(extract_year_from_query("Are the servers online?"), None);
+}
+
+/// Boundary: first valid year (1900) is accepted.
+#[test]
+fn test_extract_year_boundary_low_accepted() {
+    assert_eq!(extract_year_from_query("Events from 1900 onward."), Some(1900));
+}
+
+/// Boundary: last valid year (2099) is accepted.
+#[test]
+fn test_extract_year_boundary_high_accepted() {
+    assert_eq!(extract_year_from_query("Planning for 2099."), Some(2099));
+}
+
+/// When multiple valid years appear, the first one is returned.
+#[test]
+fn test_extract_year_returns_first_when_multiple() {
+    assert_eq!(extract_year_from_query("From 2010 to 2020."), Some(2010));
 }

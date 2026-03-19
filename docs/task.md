@@ -62,10 +62,11 @@ All six modules: `graph`, `reasoning`, `walk`, `classify`, `spatial`, `ingest`.
 - `reset_session()` — clears all four stacks; used between independent conversations.
 - `is_arithmetic_query()` — Guardrail 6; two-condition gate (numeric token + arithmetic signal). Moved here from `walk.rs` (Phase 12 refactor).
 - `evaluate_arithmetic()` — native Rust evaluator; binary/unary/fold ops; returns bare result string for miniLLM styling. Moved here from `walk.rs` (Phase 12 refactor).
+- `extract_year_from_query()` — Phase 15; scans for a 4-digit token in range 1900–2099; used as CLI year fallback when positional arg absent.
 - Status: **Complete and fully wired**.
 
 ### `src/walk.rs`
-- `predict_next()` — three-tier cascade: Tier 1 multi-signal edge scoring (OOV snap, intent ×2.0, domain ×2.0, tone ×2.0, entity ×1.5, temporal multiplier) → Tier 2 KD-tree radial fallback → Tier 3 ancestor backtrack-reroute.
+- `predict_next()` — three-tier cascade: Tier 1 multi-signal edge scoring (OOV snap, intent ×2.0, domain ×2.0, tone ×2.0, entity ×1.5, temporal multiplier) → Tier 2 KD-tree radial fallback → Tier 3 A* spatial bridge (Question/Complaint) then ancestor backtrack-reroute.
 - `resolve_start_node()` — reverse-walk up to 20 hops to find sentence anchor; domain + temporal biased.
 - `is_reachable()` — BFS reachability with `max_hops` bound; used by multi-signal guard.
 - `compute_depth_limit()` — 2-hop topology count → dynamic sentence depth (1–4).
@@ -196,7 +197,7 @@ Status: **Complete**
 Status: **Complete for V2; spaCy path removed as unused**
 - [x] `python/train_centroids.py` produces `data/centroids.json`
 - [x] `python/v2_ingest.py` produces `data/v2_graph_edges.json`
-- [x] V2 ingestion uses NLTK tokenization, NLTK NER, regex year extraction, heuristic classification
+- [x] V2 ingestion uses NLTK tokenization, NLTK NER, regex year extraction; centroid classification when model available, `mock_classify()` fallback
 - [x] `python/requirements.txt` lists all packages actually used
 - [x] spaCy NER in runtime classification path (`classify_query.py` `_ner_entities()`); NLTK used in corpus ingestion (`v2_ingest.py`)
 - [ ] Centroid inference used directly at Rust runtime (Python subprocess bridge is the active path)
@@ -219,10 +220,10 @@ Status: **Resolved — V1 surface rewritten or removed**
 - [x] `src/ingest.rs` rewritten to V2 API; exported from `lib.rs`
 - [x] `src/classify.rs` exported from `lib.rs`
 - [x] `src/spatial.rs` exported from `lib.rs`
-- [x] `tests/walk_tests.rs` — 55 tests (walk routing, guardrails, spatial, Tier 1/2/3, secondary-signal, arithmetic-guard, reset_session, WalkMode)
+- [x] `tests/walk_tests.rs` — 85 tests (walk routing, guardrails, spatial, Tier 1/2/3, secondary-signal, arithmetic-guard, reset_session, WalkMode, evaluate_arithmetic, Tier 2 centroid, extract_year_from_query, Phase 16 A* bridge)
 - [x] `tests/ingest_tests.rs` — 18 tests (sentence/text ingest, edge reinforcement, `ingest_v2_rows`, node position population)
-- [x] `tests/classify_tests.rs` — 6 tests (centroid load, intent/tone labels, determinism)
-- [x] `cargo test` passes (98/98 across all suites, zero warnings)
+- [x] `tests/classify_tests.rs` — 9 tests (centroid load, intent/tone/domain labels, determinism)
+- [x] `cargo test` passes (112/112 across all suites, zero warnings)
 
 ### Phase 5: Architecture Docs and Guardrail Design
 Status: **All guardrails and all three routing tiers implemented and wired**
@@ -235,7 +236,7 @@ Status: **All guardrails and all three routing tiers implemented and wired**
 - [x] Tier 2 KD-tree proximity search in active runtime (`walk.rs` + `SpatialGrid` wired in `predict_next`)
 - [x] Dynamic topological-density sentence limits (`compute_depth_limit` wired in CLI mode)
 - [x] Tier 3 backtrack-reroute in active runtime — ancestor BFS in `predict_next`; escapes dead-ends Tier 1 and Tier 2 cannot resolve
-- [x] Logic/arithmetic interception — `is_arithmetic_query()` in `walk.rs` (Guardrail 6); wired in CLI mode before classification
+- [x] Logic/arithmetic interception — `is_arithmetic_query()` + `evaluate_arithmetic()` in `reasoning.rs` (Guardrail 6); result piped through miniLLM; wired in CLI mode before classification
 - [x] Multi-signal validation generalised — `secondary_signal()` in `walk.rs` replaces hard-coded ATM guard; wired in both demo and CLI mode
 
 ### Phase 6: V3 Scaling and LLM Wrapper
@@ -313,6 +314,27 @@ Entity extraction currently comes from pre-labelled corpus rows (`row.entities`)
 - [x] `V2JsonData` already has `entities: Vec<String>` — no Rust struct change needed
 - [ ] Tests: mock classifier output with entity field, verify entity_stack is populated (future)
 
+### Phase 16: `complaint` Intent + Tier 3 Spatial A* Bridge
+Status: **Complete**
+
+`implementation_plan.md §4` specifies that for answer-seeking intents (`"question"`, `"complaint"`), Tier 3 must execute "A* pathfinding coordinates to bridge unconnected 3D query hubs into functional Answer hubs" — not merely backtrack to an ancestor.
+
+- [x] `WalkMode::from_intent()`: `"complaint"` now maps to `WalkMode::Question` (both are answer-seeking; mirrors implementation_plan.md §4 language)
+- [x] `spatial_a_star_bridge()` helper added to `walk.rs`: computes midpoint between current node and entity anchor in 3D space; queries KD-tree `nearest_one` at that midpoint (radius 50.0 guarantees a hit across all valid positions); rejects bridges to self or dead-end nodes
+- [x] Tier 3 in `predict_next()` upgraded: for `WalkMode::Question`, tries A* bridge first when spatial grid is available; falls through to classic ancestor backtrack on failure or when mode is not Question
+- [x] 2 new tests: A* bridge jumps to entity cluster in Question mode; bridge does not activate in Forward mode
+- [x] Existing Tier 3 tests unaffected (all 3 pass with `None` spatial — classic backtrack path unchanged)
+
+### Phase 15: Temporal Query Parsing
+Status: **Complete**
+
+Enables automatic year extraction from query text so CLI users don't need to supply `[year]` as a positional argument.
+
+- [x] `extract_year_from_query()` added to `reasoning.rs` — scans whitespace-split tokens; strips surrounding punctuation; accepts 4-digit values in range 1900–2099 only (guards against model numbers, large integers); returns first match
+- [x] Imported in `main.rs` alongside `evaluate_arithmetic` and `is_arithmetic_query`
+- [x] CLI year parsing updated: `args.get(4).and_then(|y| y.parse().ok()).or_else(|| extract_year_from_query(query))` — positional arg still takes precedence; query-extracted year is the fallback
+- [x] 12 new tests in `walk_tests.rs`: sentence-embedded year, start/end of query, punctuation-wrapped year, short/5-digit numbers rejected, boundary years (1900/2099), out-of-range rejected, no-numbers returns None, first-of-many returned
+
 ### Phase 11: Sentence Queuing (Python Sensory Pipeline)
 Status: **Complete**
 
@@ -352,6 +374,6 @@ The `implementation_plan.md` specifies a Sentence Queue to prevent embedding qua
 - **Working path**: `python/v2_ingest.py` → `data/v2_graph_edges.json` → `cargo run`
 - **`cargo run`**: passes — 5 demo scenarios, zero warnings
 - **`cargo run -- "query" entity domain [year]`**: passes — classifier and LLM bridge both degrade gracefully when Python packages absent
-- **`cargo test`**: 98/98 pass across all suites (71 walk + 18 ingest + 9 classify), zero warnings
+- **`cargo test`**: 112/112 pass across all suites (85 walk + 18 ingest + 9 classify), zero warnings
 - **V3/RAG**: Rust load path ready; Python scripts ready; only data generation step missing
 - **Full pipeline** (when packages installed): `classify_query.py` → intent/tone/domain → `walk.rs` Tier 1 → `minillm_wrapper.py` → styled response

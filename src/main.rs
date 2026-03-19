@@ -2,7 +2,7 @@ use spse_predictive::graph::WordGraph;
 use spse_predictive::ingest::{ingest_v2_rows, V2JsonData};
 use spse_predictive::reasoning::ReasoningModule;
 use spse_predictive::spatial::SpatialGrid;
-use spse_predictive::reasoning::{evaluate_arithmetic, is_arithmetic_query};
+use spse_predictive::reasoning::{evaluate_arithmetic, extract_year_from_query, is_arithmetic_query};
 use spse_predictive::walk::{compute_depth_limit, is_reachable, predict_next, secondary_signal, WalkConfig, WalkMode};
 use std::fs;
 use std::process::Command;
@@ -173,7 +173,8 @@ fn main() {
         let query  = &args[1];
         let entity = &args[2];
         let domain = &args[3];
-        let year: Option<u16> = args.get(4).and_then(|y| y.parse().ok());
+        let year: Option<u16> = args.get(4).and_then(|y| y.parse().ok())
+            .or_else(|| extract_year_from_query(query));
 
         println!("\n=========== 💬 CLI QUERY MODE 💬 ===========");
         println!("  Query  : {}", query);
