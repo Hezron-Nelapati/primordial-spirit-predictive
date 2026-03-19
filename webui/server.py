@@ -194,11 +194,16 @@ def _run_query(query: str, sid: str) -> dict:
             tone     = cls.get("tone",   "neutral")
             domain   = cls.get("domain", "general")
             entities = cls.get("entities", [])
-            # Pick entity: first NER entity (preserve original case — Rust graph
-            # stores tokens case-sensitively as tokenized from the corpus), or
-            # fall back to POS-filtered first noun from the query.
+            # Pick entity: first NER entity, then resolve to a single graph token.
+            # The graph stores individual corpus tokens — multi-word NER spans
+            # like "James Clark Ross" or "Donkey Kong" have no single node.
+            # Use the last word of multi-word entities (most specific: surname
+            # for persons, head noun for phrases) so the graph walk starts from
+            # a node that actually exists rather than hitting the OOV fallback.
             if entities:
-                entity = entities[0]
+                raw_entity = entities[0]
+                words = raw_entity.split()
+                entity = words[-1] if len(words) > 1 and len(words[-1]) > 2 else raw_entity
             else:
                 pos_words = _classify._pos_filter(query, _classify.DOMAIN_TAGS).split()
                 entity = pos_words[0] if pos_words else "query"
