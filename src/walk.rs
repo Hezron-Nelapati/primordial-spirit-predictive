@@ -216,7 +216,10 @@ fn score_edges_question(
     };
 
     // One reverse-BFS from target; look up each candidate in the result map.
-    let dist = reverse_bfs_distances(target_id, graph, 5);
+    // max_hops=2 keeps the BFS within a small predecessor neighbourhood — hub
+    // nodes like "network" (30k+ edges) make deeper BFS traverse most of the
+    // graph on every single walk step, causing timeouts.
+    let dist = reverse_bfs_distances(target_id, graph, 2);
     let best = edges.iter()
         .min_by_key(|e| dist.get(&e.to).copied().unwrap_or(usize::MAX));
 

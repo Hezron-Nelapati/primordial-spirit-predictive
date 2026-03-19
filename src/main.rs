@@ -5,7 +5,7 @@ use spse_predictive::reasoning::{ReasoningModule, SessionalMemory};
 use spse_predictive::spatial::SpatialGrid;
 use spse_predictive::reasoning::{evaluate_arithmetic, extract_year_from_query, is_arithmetic_query};
 use spse_predictive::walk::{compute_depth_limit, is_reachable, predict_next, secondary_signal, WalkConfig, WalkMode};
-use std::collections::{HashMap, VecDeque};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::fs;
 use std::io::{self, BufRead, Write};
 use std::process::Command;
@@ -92,6 +92,12 @@ fn generate_dynamic_answer(
     let mut output = start_node.clone();
     let mut current = start_node;
     let mut sentence_count = 0;
+    // Visited-node set — prevents the walker from cycling between a pair of
+    // mutually high-scoring nodes (e.g. "network" ↔ ",") which otherwise loops
+    // all 50 iterations without ever hitting a sentence terminator.
+    let mut visited: HashSet<String> = HashSet::new();
+    visited.insert(current.clone());
+
     // Rolling position window (last 5 visited nodes) for Tier 2 centroid search.
     // Vec with remove(0) is O(N) but N=5 so the shift is 5 × 12-byte copies —
     // cheaper than VecDeque which requires collect() into a new Vec every step
@@ -102,6 +108,13 @@ fn generate_dynamic_answer(
     for _ in 0..50 {
         // Vec<[f32; 3]> derefs to &[[f32; 3]] — no intermediate allocation needed.
         if let Some(next_word) = predict_next(&current, graph, spatial, reasoning, config, &pos_history) {
+            // Cycle guard: skip already-visited content words.  Punctuation is
+            // exempt so commas/periods can appear more than once (natural text).
+            let is_punct = matches!(next_word.as_str(), "." | "," | "!" | "?" | ";" | ":" | "\"" | "'");
+            if !is_punct && visited.contains(&next_word) {
+                break;
+            }
+
             // Record position of current node before advancing.
             if let Some(id) = graph.surface_to_id(&current) {
                 if let Some(node) = graph.node_by_id(id) {
@@ -118,6 +131,9 @@ fn generate_dynamic_answer(
             } else {
                 output.push(' ');
                 output.push_str(&next_word);
+            }
+            if !is_punct {
+                visited.insert(next_word.clone());
             }
             current = next_word;
         } else {
