@@ -127,6 +127,12 @@ def main():
     fallback   = "../data/corpus.json"
     corpus_rows = load_corpus(reinforced) if os.path.exists(reinforced) else load_corpus(fallback)
 
+    if corpus_rows:
+        print(f"  Mode: FULL — training from {len(corpus_rows)} corpus sentences + bootstrap examples")
+    else:
+        print("  Mode: BOOTSTRAP — no corpus found, training from seed examples only")
+        print("  (ingest will run next and produce a corpus; centroids will be retrained after)")
+
     # -----------------------------------------------------------------------
     # Build training sets
     # Start from bootstrap (guarantees all label classes present), then

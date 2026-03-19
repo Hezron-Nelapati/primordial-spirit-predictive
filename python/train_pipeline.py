@@ -3,13 +3,21 @@
 Automated training pipeline for SPSE Predictive.
 
 Steps (in order):
+  0. Bootstrap centroids → data/centroids.json       (from hardcoded examples, fast)
   1. Check / download corpus data
-  2. Run ingest        → data/corpus_tmp.json       (intermediate)
-  3. Run ingest_wiki   → data/corpus_wiki_tmp.json  (intermediate, optional)
-  4. Merge all         → data/corpus.json            (unified)
-  5. Reinforce edges   → data/corpus_reinforced.json
-  6. Train centroids   → data/centroids.json
-  7. Reset graph.db    → so Rust rebuilds from reinforced corpus on next query
+  2. Run ingest          → data/corpus_tmp.json       (uses step-0 centroids ✓)
+  3. Run ingest_wiki     → data/corpus_wiki_tmp.json  (uses step-0 centroids ✓, optional)
+  4. Merge all           → data/corpus.json            (unified)
+  5. Reinforce edges     → data/corpus_reinforced.json
+  6. Retrain centroids   → data/centroids.json         (now from full corpus)
+  7. Reset graph.db      → so Rust rebuilds from reinforced corpus on next query
+
+Why step 0 exists:
+  ingest.py classifies every sentence using centroids.json.  On a first run
+  centroids.json does not exist yet, so ingest falls back to keyword heuristics
+  (mock_classify).  Step 0 runs train_centroids.py with no corpus — it produces
+  centroids from bootstrap seed examples only, which is enough for ingest to use
+  the real centroid model.  Step 6 then retrains from the full labelled corpus.
 
 Progress lines (parsed by Flask SSE stream):
   [STEP]     Major step starting
@@ -80,6 +88,20 @@ def main() -> None:
 
     log("INFO", f"Training pipeline starting  (passes={passes})")
     log("INFO", f"Project root: {ROOT}")
+
+    # ── Step 0: Bootstrap centroids ───────────────────────────────────────────
+    # Produces centroids.json from hardcoded seed examples so that ingest.py
+    # can use the real centroid model instead of falling back to mock_classify().
+    # Skipped if centroids.json already exists (e.g. re-runs after first training).
+    if not os.path.exists(CENTROIDS_JSON):
+        log("STEP", "Bootstrapping centroids from seed examples (no corpus yet)")
+        rc = run_script("train_centroids.py")
+        if rc != 0:
+            log("WARN", "Bootstrap centroid training failed — ingest will use keyword fallback")
+        else:
+            log("DONE", "Bootstrap centroids ready → data/centroids.json")
+    else:
+        log("STEP", "centroids.json already present — skipping bootstrap")
 
     # ── Step 1: Check corpus ──────────────────────────────────────────────────
     log("STEP", "Checking corpus data")
