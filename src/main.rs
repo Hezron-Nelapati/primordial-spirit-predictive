@@ -2,7 +2,8 @@ use spse_predictive::graph::WordGraph;
 use spse_predictive::ingest::{ingest_v2_rows, V2JsonData};
 use spse_predictive::reasoning::ReasoningModule;
 use spse_predictive::spatial::SpatialGrid;
-use spse_predictive::walk::{compute_depth_limit, evaluate_arithmetic, is_arithmetic_query, is_reachable, predict_next, secondary_signal, WalkConfig, WalkMode};
+use spse_predictive::reasoning::{evaluate_arithmetic, is_arithmetic_query};
+use spse_predictive::walk::{compute_depth_limit, is_reachable, predict_next, secondary_signal, WalkConfig, WalkMode};
 use std::fs;
 use std::process::Command;
 

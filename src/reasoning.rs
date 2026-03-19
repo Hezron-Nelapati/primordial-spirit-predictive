@@ -1,5 +1,148 @@
 use crate::graph::WordGraph;
 
+/// Guardrail 6: Arithmetic / logic interception.
+///
+/// Returns `true` when the query contains **both**:
+///   1. At least one standalone numeric token (parses as a finite `f64`), and
+///   2. At least one arithmetic signal — an explicit operator token (`+`, `*`,
+///      `/`, `=`, `%`, `^`) or a keyword (`plus`, `minus`, `times`, `divided`,
+///      `equals`, `sum`, `product`, `percent`, `sqrt`, `squared`, `cubed`).
+///
+/// The two-condition gate avoids false positives on queries like
+/// "The bank closes at 5 pm" (number present but no arithmetic signal) or
+/// "What is the sum of all loans?" (arithmetic word present but no number).
+pub fn is_arithmetic_query(query: &str) -> bool {
+    const ARITH_WORDS: &[&str] = &[
+        "plus", "minus", "times", "divided", "equals", "sum",
+        "product", "percent", "sqrt", "squared", "cubed",
+    ];
+    const ARITH_OPS: &[&str] = &["+", "*", "/", "=", "%", "^"];
+
+    let mut has_number = false;
+    let mut has_arith  = false;
+
+    for raw in query.split_whitespace() {
+        let token = raw.trim_matches(|c: char| c.is_ascii_punctuation());
+        if token.is_empty() { continue; }
+
+        if !has_number && token.parse::<f64>().map(|v| v.is_finite()).unwrap_or(false) {
+            has_number = true;
+        }
+        if !has_arith {
+            let lower = token.to_lowercase();
+            if ARITH_WORDS.contains(&lower.as_str()) || ARITH_OPS.contains(&token) {
+                has_arith = true;
+            }
+        }
+        if has_number && has_arith { return true; }
+    }
+    false
+}
+
+/// Evaluate a simple arithmetic expression from a natural-language query.
+///
+/// Supports:
+/// - Binary ops: `+`, `-`, `*`, `/`, `%` and their word forms
+///   (`plus`, `minus`, `times`, `divided`, `percent`).
+/// - Unary ops on a single number: `sqrt`, `squared`, `cubed`.
+/// - Multi-number `sum` / `product` (folds the full number list).
+///
+/// Returns a raw computed result string (e.g. `"42"` or `"3.1416"`), or
+/// `None` if no computable expression is found.  The caller is responsible
+/// for conversational formatting (e.g. piping through miniLLM).
+pub fn evaluate_arithmetic(query: &str) -> Option<String> {
+    let mut numbers: Vec<f64> = Vec::new();
+    let mut binary_op: Option<char> = None;
+    let mut unary_op: Option<&str> = None;
+    let mut is_sum     = false;
+    let mut is_product = false;
+
+    for raw in query.split_whitespace() {
+        // Strip surrounding punctuation but keep minus sign on negative numbers.
+        let token = raw.trim_matches(|c: char| c.is_ascii_punctuation() && c != '-' && c != '.');
+        if token.is_empty() { continue; }
+
+        if let Ok(n) = token.parse::<f64>() {
+            if n.is_finite() { numbers.push(n); }
+            continue;
+        }
+
+        let lower = token.to_lowercase();
+        match lower.as_str() {
+            "plus"  | "add"        => { if binary_op.is_none() { binary_op = Some('+'); } }
+            "minus" | "subtract"   => { if binary_op.is_none() { binary_op = Some('-'); } }
+            "times" | "multiplied" => { if binary_op.is_none() { binary_op = Some('*'); } }
+            "divided" | "over"     => { if binary_op.is_none() { binary_op = Some('/'); } }
+            "percent" | "mod"      => { if binary_op.is_none() { binary_op = Some('%'); } }
+            "+"  => { if binary_op.is_none() { binary_op = Some('+'); } }
+            "-"  => { if binary_op.is_none() { binary_op = Some('-'); } }
+            "*"  => { if binary_op.is_none() { binary_op = Some('*'); } }
+            "/"  => { if binary_op.is_none() { binary_op = Some('/'); } }
+            "%"  => { if binary_op.is_none() { binary_op = Some('%'); } }
+            "sqrt"    => { unary_op = Some("sqrt"); }
+            "squared" => { unary_op = Some("squared"); }
+            "cubed"   => { unary_op = Some("cubed"); }
+            "sum"     => { is_sum     = true; }
+            "product" => { is_product = true; }
+            _ => {}
+        }
+    }
+
+    if numbers.is_empty() { return None; }
+
+    fn fmt(v: f64) -> String {
+        if v.fract() == 0.0 && v.abs() < 1e15 {
+            format!("{}", v as i64)
+        } else {
+            format!("{:.4}", v)
+        }
+    }
+
+    // Unary operations — operate on the first number found.
+    if let Some(uop) = unary_op {
+        let n = numbers[0];
+        let result = match uop {
+            "sqrt" => {
+                if n < 0.0 { return Some("undefined (square root of negative number)".to_string()); }
+                n.sqrt()
+            }
+            "squared" => n * n,
+            "cubed"   => n * n * n,
+            _ => return None,
+        };
+        return Some(fmt(result));
+    }
+
+    // Multi-number fold for sum/product.
+    if is_sum && numbers.len() >= 2 {
+        return Some(fmt(numbers.iter().sum()));
+    }
+    if is_product && numbers.len() >= 2 {
+        return Some(fmt(numbers.iter().product()));
+    }
+
+    // Binary operation on first two numbers.
+    if numbers.len() >= 2 {
+        let a = numbers[0];
+        let b = numbers[1];
+        let op = binary_op.unwrap_or('+');
+        let result = match op {
+            '+' => a + b,
+            '-' => a - b,
+            '*' => a * b,
+            '/' | '%' => {
+                if b == 0.0 { return Some("undefined (division by zero)".to_string()); }
+                if op == '/' { a / b } else { a % b }
+            }
+            _ => return None,
+        };
+        return Some(fmt(result));
+    }
+
+    // Single number with no recognized operation — not enough to compute.
+    None
+}
+
 pub struct SessionalMemory {
     pub intent_stack: Vec<String>,
     pub tone_stack: Vec<String>,

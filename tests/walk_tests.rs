@@ -1,7 +1,8 @@
 use spse_predictive::graph::{WordGraph, WordNode, WordEdge};
 use spse_predictive::reasoning::ReasoningModule;
 use spse_predictive::spatial::SpatialGrid;
-use spse_predictive::walk::{compute_depth_limit, evaluate_arithmetic, is_arithmetic_query, is_reachable, predict_next, resolve_start_node, secondary_signal, WalkConfig, WalkMode};
+use spse_predictive::reasoning::{evaluate_arithmetic, is_arithmetic_query};
+use spse_predictive::walk::{compute_depth_limit, is_reachable, predict_next, resolve_start_node, secondary_signal, WalkConfig, WalkMode};
 
 // ---------------------------------------------------------------------------
 // Graph construction helpers
@@ -743,31 +744,31 @@ fn test_is_arithmetic_query_detects_divided_keyword() {
 #[test]
 fn test_evaluate_arithmetic_addition_symbol() {
     let result = evaluate_arithmetic("what is 5 + 3?");
-    assert_eq!(result, Some("The answer is 8.".to_string()));
+    assert_eq!(result, Some("8".to_string()));
 }
 
 #[test]
 fn test_evaluate_arithmetic_addition_word() {
     let result = evaluate_arithmetic("What is 12 plus 8?");
-    assert_eq!(result, Some("The answer is 20.".to_string()));
+    assert_eq!(result, Some("20".to_string()));
 }
 
 #[test]
 fn test_evaluate_arithmetic_subtraction() {
     let result = evaluate_arithmetic("10 minus 4");
-    assert_eq!(result, Some("The answer is 6.".to_string()));
+    assert_eq!(result, Some("6".to_string()));
 }
 
 #[test]
 fn test_evaluate_arithmetic_multiplication() {
     let result = evaluate_arithmetic("7 times 6");
-    assert_eq!(result, Some("The answer is 42.".to_string()));
+    assert_eq!(result, Some("42".to_string()));
 }
 
 #[test]
 fn test_evaluate_arithmetic_division() {
     let result = evaluate_arithmetic("20 divided by 4");
-    assert_eq!(result, Some("The answer is 5.".to_string()));
+    assert_eq!(result, Some("5".to_string()));
 }
 
 #[test]
@@ -780,43 +781,43 @@ fn test_evaluate_arithmetic_fractional_result() {
 #[test]
 fn test_evaluate_arithmetic_division_by_zero() {
     let result = evaluate_arithmetic("5 divided by 0");
-    assert_eq!(result, Some("The answer is undefined (division by zero).".to_string()));
+    assert_eq!(result, Some("undefined (division by zero)".to_string()));
 }
 
 #[test]
 fn test_evaluate_arithmetic_squared() {
     let result = evaluate_arithmetic("9 squared");
-    assert_eq!(result, Some("The answer is 81.".to_string()));
+    assert_eq!(result, Some("81".to_string()));
 }
 
 #[test]
 fn test_evaluate_arithmetic_cubed() {
     let result = evaluate_arithmetic("3 cubed");
-    assert_eq!(result, Some("The answer is 27.".to_string()));
+    assert_eq!(result, Some("27".to_string()));
 }
 
 #[test]
 fn test_evaluate_arithmetic_sqrt() {
     let result = evaluate_arithmetic("sqrt 16");
-    assert_eq!(result, Some("The answer is 4.".to_string()));
+    assert_eq!(result, Some("4".to_string()));
 }
 
 #[test]
 fn test_evaluate_arithmetic_sqrt_negative() {
     let result = evaluate_arithmetic("sqrt -4");
-    assert_eq!(result, Some("The answer is undefined (square root of negative number).".to_string()));
+    assert_eq!(result, Some("undefined (square root of negative number)".to_string()));
 }
 
 #[test]
 fn test_evaluate_arithmetic_sum_keyword() {
     let result = evaluate_arithmetic("sum of 3 and 7");
-    assert_eq!(result, Some("The answer is 10.".to_string()));
+    assert_eq!(result, Some("10".to_string()));
 }
 
 #[test]
 fn test_evaluate_arithmetic_product_keyword() {
     let result = evaluate_arithmetic("product of 4 and 5");
-    assert_eq!(result, Some("The answer is 20.".to_string()));
+    assert_eq!(result, Some("20".to_string()));
 }
 
 #[test]
